@@ -1,0 +1,63 @@
+# Site-tile run: a few fixed 9x9 km tiles, no mosaicking.
+#
+# Start here. It is the cheapest configuration that produces real output, and it
+# is what Phase 0 validation uses.
+#
+#   fuxicfd-wrf plan     configs/broadview_sites.yaml
+#   fuxicfd-wrf validate --config configs/broadview_sites.yaml --compare-modes
+#   fuxicfd-wrf run      configs/broadview_sites.yaml --limit 24
+
+name: broadview_sites
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/broadview/control/processed/broadview/control.h5
+
+time:
+  # The source is NOT a continuous series -- it is ~12 month-long chunks scattered
+  # over 2000-2018 at 10-min cadence, stored out of chronological order. Leaving
+  # start/end unset takes everything, sorted by time. `stride` subsamples the
+  # sorted selection, so stride: 6 means hourly.
+  start: null
+  end: null
+  stride: 1
+  limit: null
+
+tiling:
+  mode: sites
+  sites:
+    # Domain centre and the four quadrant centres, as a starting spread. Replace
+    # with your actual mast / turbine coordinates.
+    - {id: bv_center,    lon: -103.035, lat: 34.817}
+    - {id: bv_northwest, lon: -103.300, lat: 34.950}
+    - {id: bv_northeast, lon: -102.770, lat: 34.950}
+    - {id: bv_southwest, lon: -103.300, lat: 34.690}
+    - {id: bv_southeast, lon: -102.770, lat: 34.690}
+
+terrain:
+  # Broadview is ~+4.3 sigma in elevation and ~-3.9 sigma in roughness relative to
+  # FuXi-CFD's training distribution, so the model is extrapolating on both static
+  # channels. 'absolute' is faithful to the model card; 'recentered' keeps terrain
+  # relief but shifts the tile mean into the training range.
+  #
+  # 'recentered' is the default because Phase 0 measured it better on both
+  # criteria (5 tiles x 24 timesteps, reports/phase0.json):
+  #     mean profile RMSE vs WRF : 0.287 recentered  vs  0.351 absolute
+  #     mean 102 m closure bias  : +0.13/+0.15 m/s   vs  +0.22/+0.23 m/s
+  # Re-run `validate --compare-modes` if you change site or season.
+  dem_mode: recentered
+  roughness_mode: absolute
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+
+output:
+  path: /scratch/moptis/fuxicfd/out/broadview_sites.zarr
+  dtype: float16
+  variables: [u, v, w, k]
+  levels: null        # null keeps all 27; or list exact heights e.g. [83.57805, 102.17944]
+  time_chunk: 6
+  mosaic: false

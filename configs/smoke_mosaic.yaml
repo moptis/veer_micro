@@ -1,0 +1,36 @@
+# Smoke test for the mosaic path: a 2x2 block of overlapping domain tiles.
+#
+# Exercises what the per-tile smoke test cannot -- tile placement onto a common
+# grid, cosine blending across overlaps, and the mosaic Zarr layout.
+
+name: smoke_mosaic
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/broadview/control/processed/broadview/control.h5
+
+time:
+  limit: 12
+
+tiling:
+  mode: domain
+  stride_m: 6000       # 3 km overlap
+  max_tiles: 6
+
+terrain:
+  dem_mode: recentered
+  roughness_mode: absolute
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+
+output:
+  path: /scratch/moptis/fuxicfd/out/smoke_mosaic.zarr
+  dtype: float16
+  variables: [u, v, w, k]
+  levels: [102.17944]   # the level nearest 100 m; see wrg.nearest_model_level
+  time_chunk: 6
+  mosaic: true

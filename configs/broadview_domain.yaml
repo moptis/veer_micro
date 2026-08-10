@@ -1,0 +1,49 @@
+# Full-domain sweep with overlapping tiles.
+#
+# Read the size estimate from `fuxicfd-wrf plan` before launching this. At 6 km
+# stride the domain needs ~130 tiles; every tile-timestep is 19.4 MB at float16,
+# so the full time series is measured in tens of TB. The `time.stride` below
+# subsamples to hourly as a deliberate brake -- raise it knowingly.
+
+name: broadview_domain
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/broadview/control/processed/broadview/control.h5
+
+time:
+  start: null
+  end: null
+  stride: 6           # 10-min cadence -> hourly. Set to 1 only after a size check.
+  limit: null
+
+tiling:
+  mode: domain
+  # 6000 m stride on a 9000 m tile leaves 3 km of overlap for blending. FuXi-CFD
+  # sees only the 9 km window (its training CFD had a 1.5 km buffer the model does
+  # not get), so tile edges are its least reliable region and overlap is what
+  # keeps seams out of the mosaic.
+  stride_m: 6000
+  max_tiles: null
+
+terrain:
+  # See configs/broadview_sites.yaml for why 'recentered' is the default here.
+  dem_mode: recentered
+  roughness_mode: absolute
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 16
+
+output:
+  path: /scratch/moptis/fuxicfd/out/broadview_domain.zarr
+  dtype: float16
+  variables: [u, v, w, k]
+  # Trimming to turbine-relevant heights cuts the store by ~3x. These are exact
+  # model levels: 50, 55.5, 61.55, 68.205, 75.5255, 83.57805, 92.435855,
+  # 102.17944, 112.897385, 124.687123, 137.655835, 151.921419, 167.613561.
+  levels: [50.0, 61.55, 75.5255, 92.435855, 102.17944, 124.687123, 151.921419]
+  time_chunk: 6
+  mosaic: true

@@ -1,0 +1,37 @@
+# Minimal end-to-end smoke test: one tile, one chunk of 6 timesteps.
+#
+# Small enough to run on a CPU debug node in a couple of minutes, which makes it
+# the right thing to run after any change to the geometry, wind or writer code.
+#
+#   srun --partition=debug --nodes=1 --account=clusterwakes --time=00:30:00 \
+#        --qos=high --exclusive fuxicfd-wrf run configs/smoke.yaml
+
+name: smoke
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/broadview/control/processed/broadview/control.h5
+
+time:
+  limit: 6
+
+tiling:
+  mode: sites
+  sites:
+    - {id: bv_center, lon: -103.035, lat: 34.817}
+
+terrain:
+  dem_mode: absolute
+  roughness_mode: absolute
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 3
+
+output:
+  path: /scratch/moptis/fuxicfd/out/smoke.zarr
+  dtype: float16
+  variables: [u, v, w, k]
+  time_chunk: 6

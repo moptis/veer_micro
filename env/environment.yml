@@ -1,0 +1,30 @@
+# Dedicated env for the FuXi-CFD/WRF pipeline.
+#
+#   conda env create -f env/environment.yml
+#   conda activate fuxicfd
+#   pip install -e .
+#
+# onnxruntime-gpu comes from pip, not conda-forge: the conda-forge build is CPU-only.
+# It bundles its own CUDA/cuDNN wheels, so no `module load cuda` is needed on the
+# gpu-h100 nodes. On a login node with no GPU it falls back to CPU with a warning.
+name: fuxicfd
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.24
+  - scipy>=1.10
+  - h5py>=3.8
+  - pandas>=2.0
+  - xarray>=2023.1
+  - zarr>=2.14
+  - pyproj>=3.5
+  - rasterio>=1.3
+  - pydantic>=2.0
+  - pyyaml>=6.0
+  - requests>=2.28
+  - matplotlib>=3.7
+  - pytest>=7.0
+  - pip
+  - pip:
+      - onnxruntime-gpu>=1.17
