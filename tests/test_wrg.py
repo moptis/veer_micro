@@ -137,11 +137,15 @@ def test_standard_power_density_uses_mean_of_cubes():
 
 # --- levels ------------------------------------------------------------------
 
-def test_no_exact_100m_level():
-    """FuXi-CFD's nearest level to 100 m is 102.17944 m; callers must be told."""
+def test_100m_is_an_exact_level():
+    """100 m IS a FuXi-CFD level (index 19), so no interpolation is needed.
+
+    This asserted the opposite until the paper's supplementary corrected the
+    height grid.
+    """
     j, h = nearest_model_level(100.0)
-    assert h == pytest.approx(102.17944)
-    assert abs(h - 100.0) > 2.0
+    assert j == 19
+    assert h == pytest.approx(100.0)
 
 
 # --- file format -------------------------------------------------------------

@@ -40,9 +40,10 @@ from ..constants import TERRAIN_SHAPE
 from ..grids import Tile
 from ..model.preprocess import normalize_static
 from . import roughness as rough_mod
-from . import srtm, worldcover
+from . import nlcd, srtm, worldcover
 
 STATIC_MODES = ("absolute", "recentered")
+LANDCOVER_SOURCES = ("auto", "nlcd", "worldcover")
 
 
 @dataclass
@@ -52,7 +53,8 @@ class TerrainTile:
     tile_id: str
     dem: np.ndarray          # (301,301) m
     roughness: np.ndarray    # (301,301) m
-    landcover: np.ndarray    # (301,301) WorldCover class codes
+    landcover: np.ndarray    # (301,301) class codes, meaning depends on `source`
+    source: str = "worldcover"
 
     def stats(self) -> dict:
         return {
@@ -64,35 +66,78 @@ class TerrainTile:
             "z0_mean": float(self.roughness.mean()),
             "z0_min": float(self.roughness.min()),
             "z0_max": float(self.roughness.max()),
-            "landcover": rough_mod.class_histogram(self.landcover),
+            "landcover_source": self.source,
+            "landcover": rough_mod.class_histogram(self.landcover, self.source),
         }
 
 
-def build_terrain(tile: Tile, cache_root: Path, *, force: bool = False) -> TerrainTile:
-    """Fetch/resample raw terrain for a tile, using the raw cache when present."""
+def build_terrain(
+    tile: Tile,
+    cache_root: Path,
+    *,
+    source: str = "auto",
+    force: bool = False,
+) -> TerrainTile:
+    """Fetch/resample raw terrain for a tile, using the raw cache when present.
+
+    `source` picks the land-cover dataset:
+
+    * ``nlcd``       - Annual NLCD Collection 1 (CONUS/AK/HI, 30 m). Preferred
+      where available: it separates four development intensities, so rural roads
+      and verges no longer inherit an urban z0.
+    * ``worldcover`` - ESA WorldCover (global, 10 m). The fallback, and what
+      FuXi-CFD was trained on.
+    * ``auto``       - try NLCD, fall back to WorldCover if the tile is not fully
+      covered (outside the US).
+
+    The cache is keyed by source, so switching does not silently return a tile
+    built from the other dataset.
+    """
+    if source not in LANDCOVER_SOURCES:
+        raise ValueError(f"source={source!r} not in {LANDCOVER_SOURCES}")
     cache_dir = Path(cache_root) / "tiles"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = cache_dir / f"{tile.tile_id}_raw.npz"
 
-    if raw_path.exists() and not force:
-        with np.load(raw_path) as z:
-            return TerrainTile(
-                tile_id=tile.tile_id,
-                dem=z["dem"],
-                roughness=z["roughness"],
-                landcover=z["landcover"],
-            )
+    def _cache(src: str) -> Path:
+        # WorldCover keeps the original filename so existing caches stay valid.
+        return cache_dir / (f"{tile.tile_id}_raw.npz" if src == "worldcover"
+                            else f"{tile.tile_id}_raw_{src}.npz")
+
+    for src in (("nlcd", "worldcover") if source == "auto" else (source,)):
+        path = _cache(src)
+        if path.exists() and not force:
+            with np.load(path) as z:
+                return TerrainTile(
+                    tile_id=tile.tile_id, dem=z["dem"], roughness=z["roughness"],
+                    landcover=z["landcover"], source=src,
+                )
 
     dem = srtm.dem_for_tile(tile, cache_root)
-    landcover = worldcover.landcover_for_tile(tile, cache_root)
-    z0 = rough_mod.classes_to_z0(landcover)
 
+    used, landcover = None, None
+    if source in ("auto", "nlcd"):
+        codes, covered = nlcd.landcover_for_tile(tile, cache_root)
+        if covered >= 0.99:
+            used, landcover = "nlcd", codes
+        elif source == "nlcd":
+            raise ValueError(
+                f"NLCD covers only {covered:.1%} of {tile.tile_id}; it is "
+                "CONUS/AK/HI only. Use source='auto' or 'worldcover'."
+            )
+        else:
+            print(f"[terrain] NLCD covers {covered:.1%} of {tile.tile_id}; "
+                  "falling back to WorldCover")
+    if used is None:
+        used, landcover = "worldcover", worldcover.landcover_for_tile(tile, cache_root)
+
+    z0 = rough_mod.classes_to_z0(landcover, used)
     for name, arr in (("dem", dem), ("roughness", z0), ("landcover", landcover)):
         if arr.shape != TERRAIN_SHAPE:
             raise ValueError(f"{name} for {tile.tile_id} is {arr.shape}, expected {TERRAIN_SHAPE}")
 
-    np.savez_compressed(raw_path, dem=dem, roughness=z0, landcover=landcover)
-    return TerrainTile(tile_id=tile.tile_id, dem=dem, roughness=z0, landcover=landcover)
+    np.savez_compressed(_cache(used), dem=dem, roughness=z0, landcover=landcover)
+    return TerrainTile(tile_id=tile.tile_id, dem=dem, roughness=z0,
+                       landcover=landcover, source=used)
 
 
 def _recenter(field: np.ndarray, target_mean: float) -> np.ndarray:
@@ -106,6 +151,7 @@ def apply_modes(
     *,
     dem_mode: str = "absolute",
     roughness_mode: str = "absolute",
+    roughness_despeckle: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply the distribution-shift mitigation, returning physical-unit fields."""
     for name, mode in (("dem_mode", dem_mode), ("roughness_mode", roughness_mode)):
@@ -114,6 +160,8 @@ def apply_modes(
 
     dem = terrain.dem
     z0 = terrain.roughness
+    if roughness_despeckle:
+        z0 = rough_mod.despeckle(z0, size=roughness_despeckle)
     if dem_mode == "recentered":
         dem = _recenter(dem, float(np.asarray(in_stats["high_mean"])[0]))
     if roughness_mode == "recentered":
@@ -128,20 +176,27 @@ def static_channels(
     *,
     dem_mode: str = "absolute",
     roughness_mode: str = "absolute",
+    roughness_despeckle: int = 0,
+    landcover_source: str = "auto",
     force: bool = False,
 ) -> np.ndarray:
     """Normalized, zoomed (2, 300, 300) static tensor, cached per (tile, mode)."""
     cache_dir = Path(cache_root) / "tiles"
     cache_dir.mkdir(parents=True, exist_ok=True)
     key = f"{dem_mode[:3]}-{roughness_mode[:3]}"
+    if roughness_despeckle:
+        key += f"-ds{roughness_despeckle}"
+    if landcover_source != "worldcover":
+        key += f"-{landcover_source}"
     path = cache_dir / f"{tile.tile_id}_static_{key}.npy"
 
     if path.exists() and not force:
         return np.load(path)
 
-    terrain = build_terrain(tile, cache_root, force=force)
+    terrain = build_terrain(tile, cache_root, source=landcover_source, force=force)
     dem, z0 = apply_modes(
-        terrain, in_stats, dem_mode=dem_mode, roughness_mode=roughness_mode
+        terrain, in_stats, dem_mode=dem_mode, roughness_mode=roughness_mode,
+        roughness_despeckle=roughness_despeckle,
     )
     static = normalize_static(dem, z0, in_stats)
     np.save(path, static)

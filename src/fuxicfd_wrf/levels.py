@@ -133,6 +133,28 @@ class LevelSelection:
                 )
         return "; ".join(parts)
 
+    @property
+    def support(self) -> tuple[int, int]:
+        """Contiguous source-level range [lo, hi) that the weights actually touch.
+
+        Interpolating one height needs two *adjacent* source levels, so reading
+        the whole level axis to produce it wastes most of the I/O -- 27 levels
+        read for 2 used. Callers that read from disk should slice to this range
+        and use `weights_within` instead.
+        """
+        nz = np.flatnonzero(self.weights.any(axis=0))
+        return int(nz[0]), int(nz[-1]) + 1
+
+    def weights_within(self, lo: int, hi: int) -> np.ndarray:
+        """Weight matrix restricted to source levels [lo, hi)."""
+        return self.weights[:, lo:hi]
+
+    def apply_sliced(self, field: np.ndarray, lo: int, hi: int, *, level_axis: int = 1) -> np.ndarray:
+        """Apply to a field already sliced to source levels [lo, hi)."""
+        moved = np.moveaxis(np.asarray(field), level_axis, 0)
+        out = np.tensordot(self.weights_within(lo, hi), moved, axes=([1], [0]))
+        return np.moveaxis(out, 0, level_axis)
+
     def apply(self, field: np.ndarray, *, level_axis: int = 1) -> np.ndarray:
         """Apply the selection to `field`, whose level axis is `level_axis`.
 

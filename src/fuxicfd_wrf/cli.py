@@ -130,7 +130,8 @@ def _cmd_validate(args) -> int:
     print(f"[validate] using {len(tiles)} tiles x {len(prep.rows)} timesteps")
 
     print("[validate] 3: terrain distribution shift ...")
-    dist, _ = check_distribution(tiles, cfg.terrain.cache_root, prep.in_stats)
+    dist, _ = check_distribution(tiles, cfg.terrain.cache_root, prep.in_stats,
+                                 source=cfg.terrain.landcover_source)
     report.add("3_distribution_shift", dist.pop("passed"), dist)
 
     session = FuxiCFDSession(
@@ -146,6 +147,8 @@ def _cmd_validate(args) -> int:
             t.tile_id: static_channels(
                 t, prep.in_stats, cfg.terrain.cache_root,
                 dem_mode=mode, roughness_mode=cfg.terrain.roughness_mode,
+                roughness_despeckle=cfg.terrain.roughness_despeckle,
+                landcover_source=cfg.terrain.landcover_source,
             )
             for t in tiles
         }
@@ -202,6 +205,11 @@ def _cmd_wrg(args) -> int:
         air_density=args.air_density,
         time_block=args.time_block,
         terrain_cache=args.terrain_cache or default_cache_root(),
+        tile_ids=args.tile or None,
+        min_coverage=args.min_coverage,
+        allow_partial=args.allow_partial,
+        trim_edge_m=args.trim_edge,
+        n_workers=args.workers,
     )
     print(json.dumps(result, indent=2))
     if abs(result["level_m"] - args.hub_height) > 0.01:
@@ -273,6 +281,20 @@ def main(argv=None) -> int:
                    help="kg/m3 for power density; ~1.06 at Broadview's elevation")
     w.add_argument("--time-block", type=int, default=240)
     w.add_argument("--terrain-cache", type=Path, default=None)
+    w.add_argument("--tile", action="append", default=[],
+                   help="restrict to this tile id; repeatable. Site-mode stores "
+                        "hold scattered tiles whose bounding box is mostly empty.")
+    w.add_argument("--min-coverage", type=float, default=0.98,
+                   help="refuse to write if tiles cover less of the grid than this")
+    w.add_argument("--workers", type=int, default=None,
+                   help="parallel time-shard workers (default: Slurm CPUs, max 12). "
+                        "Histograms are additive so sharding time is exact.")
+    w.add_argument("--trim-edge", type=float, default=1500.0,
+                   help="metres discarded from each edge of a single-tile export; "
+                        "FuXi-CFD gets no buffer and its outer ~1.5 km is 1.9x "
+                        "noisier. Ignored for multi-tile/mosaic exports.")
+    w.add_argument("--allow-partial", action="store_true",
+                   help="write anyway despite low coverage (uncovered points = 0)")
     w.set_defaults(func=_cmd_wrg)
 
     args = p.parse_args(argv)

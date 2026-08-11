@@ -20,7 +20,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..constants import WRF_N_POINTS
 from .base import WrfSource
 
 FILENAME_RE = re.compile(r"wrfout_d03_(\d{4}-\d{2}-\d{2})_(\d{2}):(\d{2}):(\d{2})\.npz$")
@@ -83,19 +82,24 @@ class NpzWrfSource(WrfSource):
 
     def read(self, variables: list[str], rows: np.ndarray) -> dict[str, np.ndarray]:
         rows = np.asarray(rows, dtype=np.int64)
-        out = {
-            v: np.empty((rows.size, WRF_N_POINTS), dtype=np.float32) for v in variables
-        }
+        n_points = None
+        out = {}
         for i, r in enumerate(rows):
             with np.load(self.paths[r]) as z:
                 for v in variables:
                     if v not in z.files:
                         raise KeyError(f"{v} not in {self.paths[r].name}")
                     arr = z[v]
-                    if arr.shape != (WRF_N_POINTS,):
+                    if n_points is None:
+                        n_points = arr.shape[0]
+                        out = {
+                            k: np.empty((rows.size, n_points), dtype=np.float32)
+                            for k in variables
+                        }
+                    if arr.shape != (n_points,):
                         raise ValueError(
                             f"{v} in {self.paths[r].name} has shape {arr.shape}, "
-                            f"expected ({WRF_N_POINTS},)"
+                            f"expected ({n_points},)"
                         )
                     out[v][i] = arr.astype(np.float32)
         return out

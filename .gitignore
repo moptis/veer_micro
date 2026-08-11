@@ -5,3 +5,8 @@ __pycache__/
 logs/
 reports/
 *.zarr/
+
+# Notebook outputs are stripped before commit -- regenerate with:
+#   python scripts/run_notebook.py notebooks/<name>.ipynb
+# Keeping executed outputs put ~1 MB of embedded PNGs in every diff.
+.ipynb_checkpoints/

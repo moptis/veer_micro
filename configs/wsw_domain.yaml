@@ -1,0 +1,63 @@
+# WSW full domain -- every tile, 6 km stride.
+#
+#   ./scripts/launch.sh configs/wsw_domain.yaml 128
+#
+# 238 tiles at 6 km stride over the 114 x 95 km domain. Sizing: 1.44 MB per
+# tile-timestep -> 18 TB, ~83 H100-hours on standby.
+#
+# Why 6 km and not 9 km (which would be 99 tiles and 7.5 TB):
+#   FuXi-CFD gets no buffer around its 9 km window, and we measured its outer
+#   1.5 km at 1.9x the residual noise of the core. At 9 km stride you either
+#   ship degraded edges across the whole mosaic or trim them and lose 56% of the
+#   area. The 3 km overlap here means every point is covered by some tile's
+#   interior, and the WRG exporter blends overlapping tiles on the fly -- so this
+#   store is directly usable for a full-domain WRG with no mosaic step.
+#
+# Restartability: standby is preemptible. Shards write disjoint chunk-aligned
+# ranges and re-running one rewrites its own range, so preemption costs time but
+# never corrupts. 128 shards keeps each task under ~45 min, bounding that loss.
+
+name: wsw_domain
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/wsw/control/processed/wsw/control.h5
+
+time:
+  start: null
+  end: null
+  stride: 1          # full 10-min cadence
+  limit: null
+
+tiling:
+  mode: domain
+  working_crs: auto
+  stride_m: 6000     # 3 km overlap
+  max_tiles: null
+
+terrain:
+  # ~+7 sigma in elevation across this domain; recentered preserves relief and
+  # moves the tile mean into the training range.
+  dem_mode: recentered
+  roughness_mode: absolute
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+  read_block: 822
+
+output:
+  path: /scratch/moptis/fuxicfd/out/wsw_domain.zarr
+  dtype: float16
+  # u and v are what a WRG needs. Adding w and k doubles the store to 36 TB for
+  # turbulence analysis we are not doing yet -- add them back deliberately.
+  variables: [u, v]
+  # The four deliverable heights. 80 and 100 m are exact model levels; 120 and
+  # 160 m interpolate between adjacent levels (the run log prints the weights).
+  levels: [80.0, 100.0, 120.0, 160.0]
+  # 24, not 6: at 238 tiles a 6-step chunk would create ~4.2M chunk files on
+  # Lustre. 24 cuts that to ~1M at a healthy 17 MB per chunk.
+  time_chunk: 24
+  mosaic: false

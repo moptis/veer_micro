@@ -29,7 +29,7 @@ INIT_ID=$(sbatch --parsable \
     --account=clusterwakes \
     --partition=shared \
     --nodes=1 --ntasks=1 --cpus-per-task=16 --mem=64G \
-    --time=01:00:00 \
+    --time=04:00:00 \
     --output=logs/fuxicfd_init_%j.out \
     --error=logs/fuxicfd_init_%j.err \
     --wrap "source \$(conda info --base)/etc/profile.d/conda.sh && conda activate fuxicfd && fuxicfd-wrf init ${CONFIG}")

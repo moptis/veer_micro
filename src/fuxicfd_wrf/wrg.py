@@ -325,11 +325,21 @@ def write_wrg(
             f"length mismatch: x={len(x)} y={len(y)} records={records.shape[0]}"
         )
 
+    n_nan = int((~np.isfinite(records[:, 2])).sum())
+    if n_nan:
+        print(
+            f"[wrg] WARNING: {n_nan:,}/{records.shape[0]:,} grid points have no "
+            "Weibull fit and are written as zeros. A consumer cannot distinguish "
+            "those from genuine calm; prefer a fully covered grid."
+        )
+
     df = pd.DataFrame({"X": np.round(x).astype(np.int64), "Y": np.round(y).astype(np.int64)})
     for i in range(records.shape[1]):
         col = records[:, i]
         if i in (2, 3):
-            df[i] = np.round(col, 2)
+            # nan_to_num here too: these are float columns, so NaN would otherwise
+            # be written as the literal text "nan" and break any WAsP-style reader.
+            df[i] = np.round(np.nan_to_num(col), 2)
         elif i == 4:
             df[i] = np.round(col, 0)
         else:

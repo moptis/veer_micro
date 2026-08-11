@@ -25,7 +25,10 @@
 #SBATCH --qos=normal
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=120G
+# 64G, not 120G: measured peak RSS is ~3 GB, and a 120G request caps packing at
+# 3 tasks per 360 GB node when 4 GPUs are available -- idling a quarter of every
+# node's GPUs. 64G keeps ~13x headroom and lets the GPU count be the limit.
+#SBATCH --mem=64G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/fuxicfd_%A_%a.out
 #SBATCH --error=logs/fuxicfd_%A_%a.err

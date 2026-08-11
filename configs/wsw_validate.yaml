@@ -1,0 +1,59 @@
+# Phase 0 validation for the WSW domain.
+#
+#   sbatch scripts/validate_gpu.sh configs/wsw_validate.yaml
+#
+# Five tiles spanning the domain's terrain range (full-tile relief from
+# scripts/find_complex_tiles.py), so the dem_mode decision is made across the
+# range it will be applied to rather than at one point:
+#
+#     wsw_center  116 m relief   domain centre
+#     wsw_hi5     271 m          7 km from High_Lonesome
+#     wsw_hi3     511 m
+#     wsw_hi2     532 m
+#     wsw_hi1     663 m          highest in the domain
+#
+# This replaces the Broadview Phase 0, which is not transferable: Broadview is
+# +4.35 sigma in elevation and nearly flat, WSW is ~+7 sigma with 1000 m of
+# domain relief. The earlier run was also scored with the wrong height grid --
+# its closure check compared the model's 80 m wind against WRF at 100 m, and two
+# of its nine profile heights (250, 300 m) sat above the model's 214.29 m ceiling
+# and were silently extrapolated.
+
+name: wsw_validate
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/wsw/control/processed/wsw/control.h5
+
+time:
+  start: null
+  end: null
+  stride: 1
+  limit: null        # validate overrides this with --n-times
+
+tiling:
+  mode: sites
+  working_crs: auto
+  sites:
+    - {id: wsw_center, lon: -105.4868, lat: 34.5350}
+    - {id: wsw_hi5,    lon: -106.0163, lat: 34.5112}
+    - {id: wsw_hi3,    lon: -105.8624, lat: 34.2869}
+    - {id: wsw_hi2,    lon: -105.8075, lat: 34.1701}
+    - {id: wsw_hi1,    lon: -105.7535, lat: 34.2872}
+
+terrain:
+  dem_mode: recentered      # --compare-modes evaluates both regardless
+  roughness_mode: absolute
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+
+output:
+  path: /scratch/moptis/fuxicfd/out/wsw_validate.zarr
+  dtype: float16
+  variables: [u, v, w, k]
+  levels: null
+  time_chunk: 6

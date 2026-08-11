@@ -1,0 +1,69 @@
+# WSW domain (Duran Mesa area, NM) -- single tile at the domain centre.
+#
+# First run on this domain. Differs from Broadview in ways the code now reads
+# from the store rather than assuming:
+#   grid      96 x 114 = 10,944 points (Broadview is 78 x 132)
+#   spacing   1003 x 998 m -- natively ~1 km, so the 9x9 stencil barely resamples
+#   extent    113 x 95 km
+#   elevation 1473-2488 m domain-wide; ~1920 m over this tile
+#
+#   python scripts/describe_domain.py <store> --turbines <csv>   # geometry first
+#   python scripts/sizing.py configs/wsw_center.yaml
+#   ./scripts/launch.sh configs/wsw_center.yaml 8
+#
+# For the whole domain instead, see configs/wsw_domain.yaml (238 tiles).
+
+name: wsw_center
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/wsw/control/processed/wsw/control.h5
+
+time:
+  # Same structure as Broadview: 52560 steps at 10-min cadence, stitched from
+  # month-long chunks scattered over 2002-2021, NOT chronologically ordered
+  # (7 backward jumps). Selection is always by timestamp.
+  start: null
+  end: null
+  stride: 1
+  limit: null
+
+tiling:
+  mode: sites
+  # "auto" resolves the UTM zone from the domain centre. WSW lands in 13N, the
+  # same as Broadview, but by geography rather than by design.
+  working_crs: auto
+  sites:
+    # Centre of the coarse domain. Relief over this tile is 116 m -- more than
+    # Broadview's 70 m but still modest. The eight wind farms in this domain sit
+    # 16-50 km away; a farm-centred tile would be the more useful deliverable and
+    # likely a stronger test of terrain response.
+    - {id: wsw_center, lon: -105.4868, lat: 34.5350}
+
+terrain:
+  # This domain is FURTHER out of distribution than Broadview: ~1920 m mean
+  # elevation against a training mean of 352 +/- 228 m is about +6.9 sigma
+  # (Broadview was +4.35). 'recentered' preserves relief and moves the tile mean
+  # into range; the CFD behind FuXi-CFD is incompressible with constant density,
+  # so absolute elevation is physically irrelevant and only the model's learned
+  # sensitivity to it is being corrected.
+  dem_mode: recentered
+  roughness_mode: absolute
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+  read_block: 822
+
+output:
+  path: /scratch/moptis/fuxicfd/out/wsw_center.zarr
+  dtype: float16
+  variables: [u, v, w, k]
+  # All 27 levels deliberately. A level subset stores only the chosen indices, so
+  # it cannot be repaired after the fact if a level definition is ever found
+  # wrong -- only re-run. 1 TB for one tile is cheap insurance against that.
+  levels: null
+  time_chunk: 6
+  mosaic: false

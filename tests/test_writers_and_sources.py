@@ -47,20 +47,19 @@ def test_resolve_levels_default_is_all():
 
 
 def test_resolve_levels_exact_match():
-    sel = resolve_levels([102.17944, 50.0])
-    assert sel.heights.tolist() == [50.0, 102.17944]  # sorted by height
+    sel = resolve_levels([100.0, 50.0])
+    assert sel.heights.tolist() == [50.0, 100.0]  # sorted by height
     assert sel.exact.all()
 
 
 def test_resolve_levels_interpolates_non_model_height():
-    """100 m is not a model level, so it is interpolated -- and labelled 100 m.
+    """120 m is not a model level, so it is interpolated -- and labelled 120 m.
 
-    Earlier this raised. Interpolating is the right behaviour (deliverables are
-    specified at round heights); what must never happen is *snapping* to 102.18 m
-    while still calling the field 100 m.
+    What must never happen is *snapping* to 125.94 m while still calling the
+    field 120 m. (80 and 100 m are exact levels and need no interpolation.)
     """
-    sel = resolve_levels([100.0])
-    assert sel.heights.tolist() == [100.0]
+    sel = resolve_levels([120.0])
+    assert sel.heights.tolist() == [120.0]
     assert not sel.exact[0]
     assert np.count_nonzero(sel.weights[0]) == 2
 

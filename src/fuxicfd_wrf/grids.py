@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 import pyproj
 
-from .constants import (
+from .constants import (  # noqa: F401
     COARSE_RES_M,
     COARSE_SHAPE,
     GEOGRAPHIC_CRS,
@@ -32,6 +32,7 @@ from .constants import (
     WORKING_CRS,
     WRF_GRID_SHAPE,
     WRF_N_POINTS,
+    utm_crs_for,
 )
 
 #: Half-width of a tile's coarse stencil: outermost cell centres sit +/- 4 km.
@@ -152,10 +153,14 @@ class DomainGeometry:
     ):
         lat = np.asarray(lat, dtype=np.float64)
         lon = np.asarray(lon, dtype=np.float64)
-        if lat.size != WRF_N_POINTS or lon.size != WRF_N_POINTS:
+        n_expected = grid_shape[0] * grid_shape[1]
+        if lat.size != n_expected or lon.size != n_expected:
             raise ValueError(
-                f"expected {WRF_N_POINTS} points, got lat={lat.size} lon={lon.size}"
+                f"grid_shape {grid_shape} implies {n_expected} points, but got "
+                f"lat={lat.size} lon={lon.size}. Pass the store's `domain_shape`."
             )
+        if crs == "auto":
+            crs = utm_crs_for(lon, lat)
         self.grid_shape = grid_shape
         self.lat = lat.reshape(grid_shape)
         self.lon = lon.reshape(grid_shape)

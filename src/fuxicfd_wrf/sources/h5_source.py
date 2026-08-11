@@ -6,7 +6,8 @@ Layout (verified on /scratch/moptis/c2wind/broadview/control/processed/broadview
     coordinates      (10296, 2)  float32  -- column 0 is lat, column 1 is lon
     elevation        (10296,)    float32
     time_index       (52560,)    |S25     -- ISO strings with +00:00 offset
-    root attr domain_shape = [78, 132]
+    root attr domain_shape = [nrow, ncol]   -- differs per domain
+                                            (Broadview 78x132, WSW 96x114)
 
 Two properties of this file drive the whole design:
 
@@ -30,7 +31,6 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from ..constants import WRF_N_POINTS
 from .base import WrfSource
 
 #: Row-chunk height of the variable datasets. Read blocks are aligned to this.
@@ -82,14 +82,32 @@ class H5WrfSource(WrfSource):
             )
         return self._times
 
+    @property
+    def domain_shape(self) -> tuple[int, int]:
+        """(nrow, ncol) from the store's root attr -- differs between domains."""
+        shp = self.file.attrs.get("domain_shape")
+        if shp is None:
+            raise KeyError(f"{self.path.name} has no `domain_shape` root attribute")
+        return (int(shp[0]), int(shp[1]))
+
     def coordinates(self) -> tuple[np.ndarray, np.ndarray]:
         c = self.file["coordinates"][:]
-        if c.shape != (WRF_N_POINTS, 2):
-            raise ValueError(f"coordinates has shape {c.shape}, expected ({WRF_N_POINTS}, 2)")
+        nrow, ncol = self.domain_shape
+        if c.shape != (nrow * ncol, 2):
+            raise ValueError(
+                f"coordinates has shape {c.shape}, expected ({nrow * ncol}, 2) "
+                f"for domain_shape {self.domain_shape}"
+            )
         return c[:, 0].astype(np.float64), c[:, 1].astype(np.float64)
 
     def elevation(self) -> np.ndarray:
         return self.file["elevation"][:].astype(np.float64)
+
+    @property
+    def n_points(self) -> int:
+        """Columns in the flat variable arrays, i.e. nrow * ncol for this domain."""
+        nrow, ncol = self.domain_shape
+        return nrow * ncol
 
     @property
     def variables(self) -> list[str]:
@@ -108,7 +126,7 @@ class H5WrfSource(WrfSource):
         """
         rows = np.asarray(rows, dtype=np.int64)
         if rows.size == 0:
-            return {v: np.empty((0, WRF_N_POINTS), dtype=np.float32) for v in variables}
+            return {v: np.empty((0, self.n_points), dtype=np.float32) for v in variables}
 
         missing = [v for v in variables if v not in self.file]
         if missing:
@@ -117,7 +135,7 @@ class H5WrfSource(WrfSource):
         order = np.argsort(rows, kind="stable")
         sorted_rows = rows[order]
         out = {
-            v: np.empty((rows.size, WRF_N_POINTS), dtype=np.float32) for v in variables
+            v: np.empty((rows.size, self.n_points), dtype=np.float32) for v in variables
         }
 
         for block_start, block_end, sel in self._blocks(sorted_rows):

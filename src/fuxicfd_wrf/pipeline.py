@@ -82,7 +82,14 @@ def prepare(cfg: RunConfig, *, build_static: bool = True) -> Prepared:
     """Resolve geometry, tiles, times and per-tile static inputs."""
     src = open_source(cfg)
     lat, lon = src.coordinates()
-    geom = DomainGeometry(lat, lon)
+    # Grid shape and UTM zone come from the store, not from constants -- domains
+    # differ (Broadview 78x132 at ~800 m, WSW 96x114 at ~1000 m).
+    shape = getattr(src, "domain_shape", None)
+    geom = DomainGeometry(
+        lat, lon,
+        crs=cfg.tiling.working_crs,
+        **({"grid_shape": shape} if shape else {}),
+    )
     tiles = build_tiles(cfg, geom)
     if not tiles:
         raise ValueError("no tiles selected -- check tiling config against the domain extent")
@@ -125,6 +132,8 @@ def prepare(cfg: RunConfig, *, build_static: bool = True) -> Prepared:
                 t, in_stats, cfg.terrain.cache_root,
                 dem_mode=cfg.terrain.dem_mode,
                 roughness_mode=cfg.terrain.roughness_mode,
+                roughness_despeckle=cfg.terrain.roughness_despeckle,
+                landcover_source=cfg.terrain.landcover_source,
             )
 
     return Prepared(

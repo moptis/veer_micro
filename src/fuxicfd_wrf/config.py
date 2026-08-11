@@ -35,6 +35,9 @@ class SiteTile(BaseModel):
 
 class TilingConfig(BaseModel):
     mode: Literal["sites", "domain"] = "sites"
+    #: Projected CRS tiles are laid out in. "auto" picks the UTM zone containing
+    #: the domain centre, which is what you want unless comparing across domains.
+    working_crs: str = "auto"
     #: mode="sites"
     sites: list[SiteTile] = Field(default_factory=list)
     #: mode="domain": tile centre spacing. Less than 9000 m gives overlap for blending.
@@ -55,6 +58,19 @@ class TilingConfig(BaseModel):
 
 
 class TerrainConfig(BaseModel):
+    #: Land-cover dataset behind the roughness channel.
+    #:
+    #: "nlcd" (US only, 30 m) separates four development intensities, so rural
+    #: roads and verges no longer inherit an urban z0 -- the cause of the
+    #: single-pixel roughness spikes that produced localised wind artifacts.
+    #: "worldcover" is global and is what FuXi-CFD was trained on. "auto" (the
+    #: default) uses NLCD where it has coverage and falls back to WorldCover
+    #: elsewhere -- so US domains get the better data and non-US ones still run.
+    landcover_source: Literal["auto", "nlcd", "worldcover"] = "auto"
+    #: Median-filter width (px) applied to z0 to remove isolated spikes. 0 = off.
+    #: Largely unnecessary with NLCD, which fixes the values at source.
+    roughness_despeckle: int = 0
+
     #: See terrain/build.py for why these exist -- Broadview is ~4 sigma off the
     #: training distribution on both static channels.
     dem_mode: Literal["absolute", "recentered"] = "absolute"

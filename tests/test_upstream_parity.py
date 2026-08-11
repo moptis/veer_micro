@@ -56,25 +56,35 @@ def upstream():
     return a
 
 
-def test_heights_match_shipped_asset(upstream):
-    """Our hard-coded OUTPUT_HEIGHTS must equal height.npy[2:29].
+def test_heights_match_supplementary(upstream):
+    """OUTPUT_HEIGHTS must match the paper's Supplementary Note 1.1 exactly."""
+    h = constants.validate_heights(upstream.height)
+    assert h.shape == (constants.N_LEVELS,)
+    assert h[0] == 5.0
+    assert h[-1] == pytest.approx(214.29)
+    # First 20 are a uniform 5 m ladder to 100 m.
+    assert np.allclose(h[:20], np.arange(1, 21) * 5.0)
 
-    The 2:29 slice is undocumented in prose -- it comes from upstream's
-    check.ipynb. This guards against both our transcription and an upstream change.
+
+def test_height_npy_is_not_the_output_grid(upstream):
+    """Regression: height.npy is the 56-level CFD solver grid, not the outputs.
+
+    Deriving OUTPUT_HEIGHTS from ``height.npy[2:29]`` mislabels the true 100 m
+    level as 151.9 m -- an 86 m error at the top of the stack. The shipped
+    check.ipynb does exactly that, and its 45.0 m lookup lands at a different
+    index under each grid, so the example never reveals the mistake.
     """
-    derived = constants.validate_heights_against_asset(upstream.height)
-    assert derived.shape == (constants.N_LEVELS,)
-    assert derived[0] == 10.0
-    assert derived[-1] == pytest.approx(300.795452)
+    full = np.load(upstream.height)
+    assert full.size == 56, "height.npy should be the full solver grid"
+    bad = np.asarray(full[2:29])
+    assert not np.allclose(bad, constants.OUTPUT_HEIGHTS)
+    assert abs(bad[19] - 100.0) > 50.0, "the bad slice puts ~152 m where 100 m belongs"
 
 
-def test_paper_height_claim_is_wrong(upstream):
-    """The paper says the stack reaches 214 m; the shipped code says 300.8 m.
-
-    Documented as a test so the discrepancy stays visible rather than becoming
-    folklore. If a future release makes the paper right, this fails loudly.
-    """
-    assert constants.OUTPUT_HEIGHTS[-1] > 300.0
+def test_common_hub_heights_are_exact_levels():
+    """80 m and 100 m are model levels, so they need no interpolation."""
+    for h in constants.EXACT_HUB_HEIGHTS:
+        assert np.abs(constants.OUTPUT_HEIGHTS - h).min() == 0.0
 
 
 @pytest.fixture(scope="module")

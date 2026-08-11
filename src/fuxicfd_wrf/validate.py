@@ -36,7 +36,7 @@ from .terrain.build import build_terrain, sigma_offsets
 from .winds import speeddir_to_uv, stencil_winds, uv_to_speeddir
 
 #: Model level closest to the 100 m WRF input, used for the closure check.
-CLOSURE_LEVEL = int(np.argmin(np.abs(OUTPUT_HEIGHTS - 100.0)))  # 102.18 m
+CLOSURE_LEVEL = int(np.argmin(np.abs(OUTPUT_HEIGHTS - 100.0)))  # index 19, exactly 100 m
 
 
 @dataclass
@@ -109,10 +109,12 @@ def check_upstream_parity(assets_root=None, *, device: str = "cpu") -> tuple[dic
 
 # --- check 3 -----------------------------------------------------------------
 
-def check_distribution(tiles: list[Tile], cache_root: Path, in_stats: dict) -> dict:
+def check_distribution(
+    tiles: list[Tile], cache_root: Path, in_stats: dict, source: str = "worldcover"
+) -> dict:
     per_tile, terrains = {}, {}
     for t in tiles:
-        terrain = build_terrain(t, cache_root)
+        terrain = build_terrain(t, cache_root, source=source)
         terrains[t.tile_id] = terrain
         per_tile[t.tile_id] = {**sigma_offsets(terrain, in_stats), **terrain.stats()}
 
@@ -209,9 +211,12 @@ def check_closure(sample: dict) -> dict:
 
 def check_profile(sample: dict, prep, rows: np.ndarray, tiles: list[Tile]) -> dict:
     """Compare tile-mean FuXi-CFD profile against WRF's own 9-height profile."""
-    wrf_vars = [f"wind_speed_{h}m" for h in WRF_WIND_HEIGHTS]
+    # The model tops out at 214.29 m, so WRF's 250 m and 300 m levels are outside
+    # it. Comparing against them would mean extrapolating the FuXi profile.
+    usable = [h for h in WRF_WIND_HEIGHTS if h <= OUTPUT_HEIGHTS[-1]]
+    wrf_vars = [f"wind_speed_{h}m" for h in usable]
     available = [v for v in wrf_vars if v in getattr(prep.source, "variables", [])]
-    heights = [h for h, v in zip(WRF_WIND_HEIGHTS, wrf_vars) if v in available]
+    heights = [h for h, v in zip(usable, wrf_vars) if v in available]
     if not available:
         return {"passed": None, "note": "no multi-height WRF wind speeds in source"}
 
