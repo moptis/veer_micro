@@ -29,6 +29,7 @@ than no WRG, because nothing downstream will tell you they are there.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,57 @@ from .wrg_read import read_wrg
 
 def _tile_centre(df: pd.DataFrame) -> tuple[float, float]:
     return float(df["x"].mean()), float(df["y"].mean())
+
+
+_TILE_RC = re.compile(r"^t_(\d+)_(\d+)")
+
+
+def largest_full_rect(paths: list[Path]) -> list[Path]:
+    """Drop tiles until the remainder forms a complete rectangle.
+
+    A WRG is a rectangular grid, but a bbox selection need not be rectangular:
+    the WRF domain is rotated in UTM, so its boundary cuts diagonally across the
+    tile lattice and a box near an edge comes back L-shaped. Concatenating that
+    either fails the hole check or, with allow_holes, writes zeros that
+    downstream tools read as real calm.
+
+    Picks the axis-aligned sub-block of the (row, col) lattice containing the
+    most tiles with none missing. Brute force over row and column ranges --
+    lattices are tens of tiles on a side, so this is microseconds and the
+    obvious-and-correct version is worth more than a clever one.
+
+    Tiles whose names do not carry `t_<row>_<col>` are returned untouched; site
+    runs have arbitrary ids and no lattice to reason about.
+    """
+    rc = {}
+    for p in paths:
+        m = _TILE_RC.match(p.stem)
+        if not m:
+            return list(paths)
+        rc[(int(m.group(1)), int(m.group(2)))] = p
+
+    rows = sorted({r for r, _ in rc})
+    cols = sorted({c for _, c in rc})
+    best, best_n = None, -1
+    for i0 in range(len(rows)):
+        for i1 in range(i0, len(rows)):
+            for j0 in range(len(cols)):
+                for j1 in range(j0, len(cols)):
+                    rs, cs = rows[i0:i1 + 1], cols[j0:j1 + 1]
+                    if all((r, c) in rc for r in rs for c in cs):
+                        n = len(rs) * len(cs)
+                        if n > best_n:
+                            best, best_n = (rs, cs), n
+    if best is None:
+        return list(paths)
+    rs, cs = best
+    keep = [rc[(r, c)] for r in rs for c in cs]
+    if len(keep) < len(paths):
+        dropped = sorted(p.stem for p in paths if p not in set(keep))
+        print(f"[concat] --largest-rect: keeping {len(keep)} tiles in a "
+              f"{len(rs)}x{len(cs)} block, dropping {len(dropped)} outside it: "
+              f"{', '.join(dropped[:8])}{' ...' if len(dropped) > 8 else ''}")
+    return keep
 
 
 def concat_wrgs(

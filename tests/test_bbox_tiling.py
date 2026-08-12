@@ -21,6 +21,10 @@ from pydantic import ValidationError
 
 from fuxicfd_wrf.config import BBox, TilingConfig
 from fuxicfd_wrf.grids import GEOGRAPHIC_CRS, DomainGeometry
+from fuxicfd_wrf.pipeline import (
+    _check_bbox_coverage,
+    _check_lattice_is_rectangular,
+)
 
 from test_geometry_and_winds import _synthetic_domain
 
@@ -146,3 +150,55 @@ def test_bbox_is_rejected_in_sites_mode():
             sites=[{"id": "a", "lon": -105.0, "lat": 34.5}],
             bbox=BBox(min_lon=-106.0, min_lat=34.0, max_lon=-105.0, max_lat=35.0),
         )
+
+
+# --- coverage and lattice guards ---------------------------------------------
+
+def _tiles_from(geom, bbox):
+    return geom.make_tiles(stride_m=STRIDE, bbox=bbox)
+
+
+def test_coverage_is_full_for_a_box_inside_the_domain():
+    geom = _geom()
+    bbox = _domain_lonlat_box(geom)
+    frac = _check_bbox_coverage(geom, _tiles_from(geom, bbox), STRIDE, bbox, 0.9)
+    assert frac > 0.999
+
+
+def test_coverage_guard_rejects_a_box_mostly_outside_the_domain():
+    """The real failure: a box hanging far off the domain edge still selects
+    tiles, so nothing errors and the run proceeds on a fraction of the request."""
+    geom = _geom()
+    lon0, lat0, lon1, lat1 = _domain_lonlat_box(geom, shrink=0.3)
+    # Extend the southern edge well past the domain: the overhang dominates.
+    bbox = (lon0, lat0 - 3 * (lat1 - lat0), lon1, lat1)
+    tiles = _tiles_from(geom, bbox)
+    assert tiles, "the box still intersects the domain, so tiles are selected"
+
+    with pytest.raises(ValueError, match="of the requested box is covered"):
+        _check_bbox_coverage(geom, tiles, STRIDE, bbox, 0.9)
+
+
+def test_coverage_guard_can_be_disabled():
+    geom = _geom()
+    lon0, lat0, lon1, lat1 = _domain_lonlat_box(geom, shrink=0.3)
+    bbox = (lon0, lat0 - 3 * (lat1 - lat0), lon1, lat1)
+    frac = _check_bbox_coverage(geom, _tiles_from(geom, bbox), STRIDE, bbox, 0.0)
+    assert 0.0 < frac < 0.9
+
+
+def test_lattice_check_counts_tiles_absent_from_the_bounding_block():
+    geom = _geom(rotation_deg=-8.0)     # exaggerated, to guarantee a ragged edge
+    tiles = geom.make_tiles(stride_m=STRIDE)
+    missing = _check_lattice_is_rectangular(tiles)
+
+    rc = [tuple(map(int, t.tile_id.split("_")[1:])) for t in tiles]
+    rows = {r for r, _ in rc}
+    cols = {c for _, c in rc}
+    assert missing == len(rows) * len(cols) - len(tiles)
+    assert missing > 0, "a strongly rotated domain must give a ragged lattice"
+
+
+def test_lattice_check_is_silent_for_site_tiles():
+    from fuxicfd_wrf.grids import Tile
+    assert _check_lattice_is_rectangular([Tile("mast_a", x=0.0, y=0.0)]) == 0

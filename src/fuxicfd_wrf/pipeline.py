@@ -15,6 +15,7 @@ The only per-timestep work is a sparse matmul for the 9x9 stencil and a small zo
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,7 @@ import pandas as pd
 
 from .config import RunConfig
 from .constants import MODEL_SHAPE, OUTPUT_VARS
-from .grids import DomainGeometry, Tile
+from .grids import GEOGRAPHIC_CRS, DomainGeometry, Tile
 from .model import assets as assets_mod
 from .model import postprocess, preprocess
 from .model.session import FuxiCFDSession
@@ -80,6 +81,10 @@ def build_tiles(cfg: RunConfig, geom: DomainGeometry) -> list[Tile]:
         lo0, la0, lo1, la1 = _tiles_lonlat_extent(geom, tiles, stride)
         print(f"[tiles] bbox selected {len(tiles)} of {n_full} domain tiles; "
               f"covering lon {lo0:.4f}..{lo1:.4f}  lat {la0:.4f}..{la1:.4f}")
+        _check_bbox_coverage(geom, tiles, stride, bbox,
+                             cfg.tiling.min_bbox_coverage)
+    if cfg.tiling.mode == "domain":
+        _check_lattice_is_rectangular(tiles)
     if cfg.tiling.max_tiles:
         tiles = tiles[: cfg.tiling.max_tiles]
     return tiles
@@ -91,6 +96,98 @@ def _tiles_lonlat_extent(geom: DomainGeometry, tiles: list[Tile], stride_m: floa
         return (float("nan"),) * 4
     b = np.array([geom.core_lonlat_bounds(t, stride_m) for t in tiles])
     return float(b[:, 0].min()), float(b[:, 1].min()), float(b[:, 2].max()), float(b[:, 3].max())
+
+
+def _check_bbox_coverage(geom, tiles, stride_m, bbox, minimum: float) -> float:
+    """How much of the requested box the selected tiles actually cover.
+
+    A bbox that overhangs the WRF domain is not an error -- tiles are selected by
+    intersection, so the run simply gets fewer of them. But "fewer" and "half of
+    what you asked for" deserve different reactions, and reporting only the
+    covered extent (as this did originally) buries the difference: it takes
+    comparing two lon/lat ranges by eye to notice that most of the request was
+    unreachable. That is worth catching before the GPU hours, not after.
+
+    Measured by sampling the requested box and testing membership in the union of
+    tile cores. Sampling rather than polygon intersection because cores are
+    rectangles in the projected CRS while the box is in lon/lat, so the exact
+    intersection is a clipped quad union and not worth the dependency.
+    """
+    import pyproj
+
+    minlon, minlat, maxlon, maxlat = bbox
+    n = 200
+    glon, glat = np.meshgrid(np.linspace(minlon, maxlon, n),
+                             np.linspace(minlat, maxlat, n))
+    tf = pyproj.Transformer.from_crs(GEOGRAPHIC_CRS, geom.crs, always_xy=True)
+    px, py = tf.transform(glon.ravel(), glat.ravel())
+
+    cores = np.array([geom.core_bounds(t, stride_m) for t in tiles])
+    inside = np.zeros(px.size, dtype=bool)
+    for cminx, cminy, cmaxx, cmaxy in cores:
+        inside |= ((px >= cminx) & (px <= cmaxx) & (py >= cminy) & (py <= cmaxy))
+    frac = float(inside.mean())
+
+    print(f"[tiles] requested box coverage: {100 * frac:.1f}%")
+    if frac >= 0.999:
+        return frac
+
+    # Name the edges that fell short, so the fix is obvious rather than a hunt.
+    edges = []
+    grid_ok = inside.reshape(n, n)
+    if not grid_ok[:, 0].any():
+        edges.append("west")
+    if not grid_ok[:, -1].any():
+        edges.append("east")
+    if not grid_ok[0, :].any():
+        edges.append("south")
+    if not grid_ok[-1, :].any():
+        edges.append("north")
+    detail = (f" The {' and '.join(edges)} edge{'s' if len(edges) > 1 else ''} "
+              f"of the box lies entirely outside the WRF domain." if edges else "")
+
+    msg = (f"tiling.bbox: only {100 * frac:.1f}% of the requested box is covered "
+           f"by the selected tiles.{detail} The rest is outside the WRF domain "
+           f"(or too close to its edge for a 9x9 km stencil), so no run can "
+           f"produce it.")
+    if frac < minimum:
+        raise ValueError(
+            msg + f"\nThis is below tiling.min_bbox_coverage={minimum}. Fix the "
+            f"box, or lower/disable the threshold (0.0) if partial is intended."
+        )
+    print(f"[tiles] WARNING: {msg}")
+    return frac
+
+
+def _check_lattice_is_rectangular(tiles: list[Tile]) -> int:
+    """Warn when the selected tiles do not form a full rectangle.
+
+    A WRG is a rectangular grid. The WRF domain is rotated in UTM, so its
+    boundary cuts diagonally across the tile lattice and a selection near an edge
+    comes back L-shaped -- which concatenates into a grid with holes. Discovering
+    that at WRG time means the inference has already been paid for, so say it
+    here instead.
+    """
+    rc = []
+    for t in tiles:
+        m = re.match(r"^t_(\d+)_(\d+)$", t.tile_id)
+        if not m:
+            return 0                    # site tiles have no lattice
+        rc.append((int(m.group(1)), int(m.group(2))))
+    if not rc:
+        return 0
+    have = set(rc)
+    rows = {r for r, _ in rc}
+    cols = {c for _, c in rc}
+    missing = len(rows) * len(cols) - len(have)
+    if missing:
+        print(
+            f"[tiles] NOTE: the {len(have)} selected tiles do not fill their "
+            f"{len(rows)}x{len(cols)} bounding block ({missing} absent, cut off by "
+            f"the rotated domain boundary). A WRG is rectangular, so `wrg-concat` "
+            f"will need --largest-rect to trim to a complete block."
+        )
+    return missing
 
 
 @dataclass

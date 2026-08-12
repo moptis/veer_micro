@@ -222,12 +222,14 @@ def _cmd_wrg(args) -> int:
 
 
 def _cmd_wrg_concat(args) -> int:
-    from .wrg_concat import concat_wrgs
+    from .wrg_concat import concat_wrgs, largest_full_rect
 
     paths = sorted(args.directory.glob(args.pattern))
     if not paths:
         print(f"no files matching {args.pattern} in {args.directory}", file=sys.stderr)
         return 1
+    if args.largest_rect:
+        paths = largest_full_rect(paths)
     result = concat_wrgs(paths, args.out, air_density=args.air_density,
                          allow_holes=args.allow_holes)
     print(json.dumps(result, indent=2))
@@ -317,7 +319,13 @@ def main(argv=None) -> int:
     wc.add_argument("--out", type=Path, required=True)
     wc.add_argument("--air-density", type=float, default=1.01)
     wc.add_argument("--allow-holes", action="store_true",
-                    help="write even if the tiles do not cover a full rectangle")
+                    help="write even if the tiles do not cover a full rectangle. "
+                         "Uncovered points are written as zeros, which downstream "
+                         "tools read as real data -- prefer --largest-rect.")
+    wc.add_argument("--largest-rect", action="store_true",
+                    help="trim to the biggest complete rectangle of tiles. Use "
+                         "when a bbox run sits against a rotated domain edge and "
+                         "comes back L-shaped; reports which tiles it drops.")
     wc.set_defaults(func=_cmd_wrg_concat)
 
     args = p.parse_args(argv)

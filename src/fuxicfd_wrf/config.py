@@ -84,6 +84,13 @@ class TilingConfig(BaseModel):
     #: so a subset run keeps the same centres and ids as the full-domain run and
     #: the two stores stay directly comparable.
     bbox: BBox | None = None
+    #: Refuse to run if the selected tiles cover less than this fraction of the
+    #: requested bbox. A box overhanging the domain edge is legitimate and only
+    #: costs a few tiles, but a box mostly outside it is a typo -- and without
+    #: this the run proceeds happily on whatever fraction did intersect, which is
+    #: only visible by comparing two lon/lat ranges in the log. Set 0.0 to allow
+    #: any partial coverage.
+    min_bbox_coverage: float = 0.9
     max_tiles: int | None = None
 
     @model_validator(mode="after")
@@ -97,6 +104,11 @@ class TilingConfig(BaseModel):
             )
         if self.stride_m <= 0 or self.stride_m > TILE_SPAN_M:
             raise ValueError(f"tiling.stride_m must be in (0, {TILE_SPAN_M}]")
+        if not 0.0 <= self.min_bbox_coverage <= 1.0:
+            raise ValueError(
+                f"tiling.min_bbox_coverage must be a fraction in [0, 1], got "
+                f"{self.min_bbox_coverage}"
+            )
         return self
 
     @property
