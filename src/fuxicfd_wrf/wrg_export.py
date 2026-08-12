@@ -297,7 +297,18 @@ def _reorder_f(records: np.ndarray, ny: int, nx: int) -> np.ndarray:
 
 
 def _elevation_on_grid(grid: WrgGrid, tiles: list[Tile], terrain_cache) -> np.ndarray:
-    """Sample cached SRTM tile DEMs onto the WRG grid.
+    """Sample cached SRTM tile DEMs onto the WRG grid, in **row-major** order.
+
+    Row-major matters: the sector histograms are indexed by `speed.reshape(nt, -1)`
+    of a (ny, nx) field, i.e. C order, and `build_records` puts elevation in the
+    same array as those statistics. `export_wrg` then reorders the whole record
+    array C -> F once, to match the column-major point order the WRG format uses.
+
+    Returning column-major here made elevation get reordered *twice* while every
+    other column was reordered once, transposing the elevation field relative to
+    its own coordinates -- 37 m RMS error on a 60x60 tile, and 7.8x steps at tile
+    seams once concatenated. Keep this C-ordered and let the single conversion in
+    `export_wrg` handle it.
 
     Returns zeros (with a warning) if unavailable -- a WRG with zero elevation is
     still usable for wind statistics, and failing the export over a missing cache
@@ -326,7 +337,7 @@ def _elevation_on_grid(grid: WrgGrid, tiles: list[Tile], terrain_cache) -> np.nd
         print("[wrg] WARNING: no cached tile DEMs found; elevation column will be 0")
         return np.zeros(grid.n_points)
     elev = np.where(wsum > 0, acc / np.maximum(wsum, 1e-9), 0.0)
-    return _reorder_f(elev.reshape(-1, 1), ny, nx).ravel()
+    return elev.ravel()          # C order, same as the histogram indexing
 
 
 # --- entry point --------------------------------------------------------------
@@ -406,11 +417,27 @@ def export_wrg(
             f"sector histograms need {gb:.1f} GB for a {grid.shape} grid at "
             f"{res_m} m. Increase --resolution or raise max_hist_gb."
         )
-    print(f"[wrg] grid {grid.shape} @ {res_m} m = {grid.n_points:,} points, "
-          f"{ctx['n_sectors']} sectors, histograms {gb:.2f} GB")
-
     workers = _resolve_workers(n_workers)
     shards = _time_shards(n_times, workers)
+
+    # Budget up front. The first full-domain attempt died after 80 minutes
+    # because only the histogram was counted: the bincount temporary and the
+    # per-block u/v accumulators together were larger than it.
+    per_worker = hist.estimate_peak_gb(time_block, grid.n_points)
+    total = per_worker * len(shards) + 2 * gb          # + parent hist and one incoming
+    print(f"[wrg] grid {grid.shape} @ {res_m} m = {grid.n_points:,} points, "
+          f"{ctx['n_sectors']} sectors, histograms {gb:.2f} GB")
+    print(f"[wrg] memory estimate: ~{per_worker:.1f} GB/worker x {len(shards)} "
+          f"+ {2*gb:.1f} GB parent = ~{total:.0f} GB peak")
+    slurm_mem = os.environ.get("SLURM_MEM_PER_NODE")
+    if slurm_mem and slurm_mem.isdigit():
+        avail = int(slurm_mem) / 1024
+        if total > 0.85 * avail:
+            raise MemoryError(
+                f"estimated peak ~{total:.0f} GB exceeds 85% of the {avail:.0f} GB "
+                f"allocation. Reduce --workers, --time-block, or --resolution."
+            )
+        print(f"[wrg] allocation {avail:.0f} GB -- OK")
     print(f"[wrg] accumulating {n_times:,} timesteps over {len(shards)} worker(s)")
 
     if len(shards) == 1:
@@ -419,14 +446,23 @@ def export_wrg(
         import multiprocessing as mp
 
         payloads = [(spec, a, b, time_block) for a, b in shards]
+        # imap_unordered, not map: map materialises every worker's histogram in
+        # the parent at once. Over a full domain each is GBs (1.08M points x 16
+        # sectors x 100 bins), so 8 workers would land ~55 GB simultaneously.
+        # Summing as results arrive keeps the parent at one extra histogram.
         with mp.get_context("spawn").Pool(len(shards)) as pool:
-            parts = pool.map(_worker_accumulate, payloads)
-        # Histograms are additive: summing shards is exact, not an approximation.
-        for counts, su, su3, ns in parts:
-            hist.counts += counts
-            hist.sum_u += su
-            hist.sum_u3 += su3
-            hist.n_samples += ns
+            done = 0
+            for counts, su, su3, ns in pool.imap_unordered(
+                _worker_accumulate, payloads
+            ):
+                # Histograms are additive: summing shards is exact.
+                hist.counts += counts
+                hist.sum_u += su
+                hist.sum_u3 += su3
+                hist.n_samples += ns
+                del counts, su, su3, ns
+                done += 1
+                print(f"[wrg]   merged shard {done}/{len(shards)}", flush=True)
 
     elevation = _elevation_on_grid(grid, ctx["tiles"], terrain_cache)
     records = build_records(

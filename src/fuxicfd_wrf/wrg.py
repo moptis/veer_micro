@@ -208,39 +208,67 @@ class SectorHistograms:
     def nbytes(self) -> int:
         return self.counts.nbytes
 
+    #: Points per bincount pass. The temporary is
+    #: `block x n_sectors x n_bins x 8` bytes, so this caps it regardless of grid
+    #: size. Doing all points at once needs `n_points x 16 x 100 x 8` -- 11.7 GB
+    #: on a 913k-point domain grid, which OOM-killed a full-domain export.
+    POINT_BLOCK = 50_000
+
     def add(self, speed: np.ndarray, direction: np.ndarray) -> None:
-        """Accumulate a time block. `speed`/`direction` are (n_time, n_points)."""
+        """Accumulate a time block. `speed`/`direction` are (n_time, n_points).
+
+        Points are processed in blocks so the bincount temporary stays bounded.
+        `np.bincount(..., minlength=counts.size)` allocates an int64 array of the
+        FULL histogram size on every call; at domain scale that is 11.7 GB per
+        call per worker, which is what killed the first full-domain attempt.
+        Blocking makes peak memory independent of how many grid points there are.
+        """
         speed = np.asarray(speed, dtype=np.float32)
         direction = np.asarray(direction, dtype=np.float32)
         nt, npts = speed.shape
         if npts != self.n_points:
             raise ValueError(f"expected {self.n_points} points, got {npts}")
 
-        valid = np.isfinite(speed) & np.isfinite(direction) & (speed > 0)
-        # Zero out non-finite entries before casting: NaN -> int is undefined and
-        # raises a RuntimeWarning. The `valid` mask discards them anyway.
-        safe_speed = np.where(valid, speed, 0.0)
-        safe_dir = np.where(valid, direction, 0.0)
-        sec = assign_sector(safe_dir, 360.0 / self.n_sectors)
-        sbin = np.clip(
-            (safe_speed / self.speed_bin).astype(np.int32), 0, self.n_bins - 1
-        )
+        bin_deg = 360.0 / self.n_sectors
+        stride = self.n_sectors * self.n_bins
 
-        pt = np.broadcast_to(np.arange(npts, dtype=np.int64), (nt, npts))
-        flat = (
-            pt[valid].astype(np.int64) * (self.n_sectors * self.n_bins)
-            + sec[valid].astype(np.int64) * self.n_bins
-            + sbin[valid].astype(np.int64)
-        )
-        # bincount, not np.add.at: the latter takes an unbuffered slow path for
-        # repeated indices and is orders of magnitude slower here.
-        bc = np.bincount(flat, minlength=self.counts.size)
-        self.counts += bc.reshape(self.counts.shape).astype(np.uint32)
+        for p0 in range(0, npts, self.POINT_BLOCK):
+            p1 = min(p0 + self.POINT_BLOCK, npts)
+            sp = speed[:, p0:p1]
+            di = direction[:, p0:p1]
+            valid = np.isfinite(sp) & np.isfinite(di) & (sp > 0)
+            if not valid.any():
+                continue
+            # Zero non-finite entries before casting: NaN -> int is undefined.
+            safe_sp = np.where(valid, sp, 0.0)
+            safe_di = np.where(valid, di, 0.0)
+            sec = assign_sector(safe_di, bin_deg)
+            sbin = np.clip((safe_sp / self.speed_bin).astype(np.int32), 0, self.n_bins - 1)
 
-        sp = np.where(valid, speed, 0.0).astype(np.float64)
-        self.sum_u += sp.sum(axis=0)
-        self.sum_u3 += (sp**3).sum(axis=0)
-        self.n_samples += valid.sum(axis=0)
+            nblock = p1 - p0
+            col = np.broadcast_to(np.arange(nblock, dtype=np.int64), (nt, nblock))
+            flat = (
+                col[valid] * stride
+                + sec[valid].astype(np.int64) * self.n_bins
+                + sbin[valid].astype(np.int64)
+            )
+            bc = np.bincount(flat, minlength=nblock * stride)
+            self.counts[p0:p1] += bc.reshape(nblock, self.n_sectors, self.n_bins).astype(
+                np.uint32
+            )
+            del bc, flat, col, sec, sbin
+
+            spv = np.where(valid, sp, 0.0).astype(np.float64)
+            self.sum_u[p0:p1] += spv.sum(axis=0)
+            self.sum_u3[p0:p1] += (spv**3).sum(axis=0)
+            self.n_samples[p0:p1] += valid.sum(axis=0)
+
+    def estimate_peak_gb(self, n_time_block: int, grid_points: int) -> float:
+        """Rough per-worker peak, so a doomed run fails before it starts."""
+        hist = self.counts.nbytes
+        temp = self.POINT_BLOCK * self.n_sectors * self.n_bins * 8
+        acc = 2 * n_time_block * grid_points * 4 * 2   # u,v accumulators + copies
+        return (hist + temp + acc) / 1e9
 
 
 # --- record assembly ---------------------------------------------------------

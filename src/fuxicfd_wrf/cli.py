@@ -221,6 +221,19 @@ def _cmd_wrg(args) -> int:
     return 0
 
 
+def _cmd_wrg_concat(args) -> int:
+    from .wrg_concat import concat_wrgs
+
+    paths = sorted(args.directory.glob(args.pattern))
+    if not paths:
+        print(f"no files matching {args.pattern} in {args.directory}", file=sys.stderr)
+        return 1
+    result = concat_wrgs(paths, args.out, air_density=args.air_density,
+                         allow_holes=args.allow_holes)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="fuxicfd-wrf",
@@ -296,6 +309,16 @@ def main(argv=None) -> int:
     w.add_argument("--allow-partial", action="store_true",
                    help="write anyway despite low coverage (uncovered points = 0)")
     w.set_defaults(func=_cmd_wrg)
+
+    wc = sub.add_parser("wrg-concat",
+                        help="merge per-tile WRGs into one domain WRG")
+    wc.add_argument("directory", type=Path)
+    wc.add_argument("--pattern", default="*.wrg")
+    wc.add_argument("--out", type=Path, required=True)
+    wc.add_argument("--air-density", type=float, default=1.01)
+    wc.add_argument("--allow-holes", action="store_true",
+                    help="write even if the tiles do not cover a full rectangle")
+    wc.set_defaults(func=_cmd_wrg_concat)
 
     args = p.parse_args(argv)
     return args.func(args)
