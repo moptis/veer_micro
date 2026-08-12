@@ -40,6 +40,12 @@ terrain:
   # moves the tile mean into the training range.
   dem_mode: recentered
   roughness_mode: absolute
+  # Pinned, not `auto`. This store was built before the NLCD reader existed, so
+  # it is WorldCover throughout; `auto` resolves to NLCD here (CONUS is fully
+  # covered) and would silently rebuild different terrain under the same name.
+  # The NLCD counterpart is configs/wsw_domain_nlcd.yaml -- a separate store, so
+  # the two remain comparable.
+  landcover_source: worldcover
   cache_root: /scratch/moptis/fuxicfd/cache
 
 model:

@@ -1,0 +1,84 @@
+# WSW full domain, NLCD roughness -- the A/B counterpart to wsw_domain.yaml.
+#
+#   ./scripts/launch.sh configs/wsw_domain_nlcd.yaml 128
+#
+# Identical to wsw_domain.yaml in every respect except `landcover_source`. That
+# is the point: the two stores differ in exactly one input channel, so any
+# difference in the resulting WRGs is attributable to the land-cover dataset and
+# nothing else. Same tiles, same 6 km stride, same timesteps, same levels, same
+# dem_mode, same seed geometry.
+#
+# What we are testing (measured domain-wide by scripts/compare_sources_domain.py):
+#
+#   * WorldCover calls 90% of this domain grassland (z0 0.03 m); NLCD calls 65%
+#     of it shrub/scrub (z0 0.10 m). Domain-mean z0 is 47% higher under NLCD.
+#     That is the dominant difference and it affects nearly every pixel.
+#   * WorldCover flags 18,111 px built-up at a flat z0 of 0.8 m; NLCD gives the
+#     same pixels a median of 0.25 m, and produces 8x fewer isolated single-pixel
+#     z0 spikes (0.20% vs 1.60% of the domain).
+#
+# The first effect should shift bulk wind speed; the second should remove
+# localised dipoles. They are separable in the output because they act at
+# different scales.
+#
+# Note this is NOT a claim that NLCD is the better input. FuXi-CFD was trained on
+# WorldCover-derived roughness, so NLCD is simultaneously more accurate on the
+# ground and further from the training distribution. Only validation against the
+# WRF profiles settles that -- see configs/wsw_validate.yaml.
+
+name: wsw_domain_nlcd
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/wsw/control/processed/wsw/control.h5
+
+time:
+  start: null
+  end: null
+  stride: 1          # full 10-min cadence
+  limit: null
+
+tiling:
+  mode: domain
+  working_crs: auto
+  stride_m: 6000     # 3 km overlap
+  max_tiles: null
+  # As written this is the full 238-tile domain: 82.7 H100-hours and 18 TB.
+  #
+  # For an A/B against the WorldCover store you almost certainly want a subset --
+  # the roughness difference is domain-wide (WorldCover 90% grassland vs NLCD 65%
+  # shrub/scrub), so a representative slice answers the question at a fraction of
+  # the cost. Because tiles are filtered from the same lattice rather than
+  # re-originated, the subset's tile ids match the WorldCover store's exactly and
+  # the two are directly comparable tile-for-tile.
+  #
+  # Price candidates first:
+  #   python scripts/sizing.py configs/wsw_domain_nlcd.yaml --bbox W S E N
+  #
+  # e.g. 36 tiles / 12.5 H100-hours / 2.7 TB around wsw_center:
+  # bbox:
+  #   min_lon: -105.65
+  #   min_lat:   34.40
+  #   max_lon: -105.32
+  #   max_lat:   34.67
+
+terrain:
+  dem_mode: recentered
+  roughness_mode: absolute
+  # The only line that differs from wsw_domain.yaml.
+  landcover_source: nlcd
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+  read_block: 822
+
+output:
+  path: /scratch/moptis/fuxicfd/out/wsw_domain_nlcd.zarr
+  dtype: float16
+  variables: [u, v]
+  levels: [80.0, 100.0, 120.0, 160.0]
+  time_chunk: 24
+  mosaic: false

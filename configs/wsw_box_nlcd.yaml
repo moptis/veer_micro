@@ -1,0 +1,71 @@
+# WSW full domain, NLCD roughness -- the A/B counterpart to wsw_domain.yaml.
+#
+#   ./scripts/launch.sh configs/wsw_domain_nlcd.yaml 128
+#
+# Identical to wsw_domain.yaml in every respect except `landcover_source`. That
+# is the point: the two stores differ in exactly one input channel, so any
+# difference in the resulting WRGs is attributable to the land-cover dataset and
+# nothing else. Same tiles, same 6 km stride, same timesteps, same levels, same
+# dem_mode, same seed geometry.
+#
+# What we are testing (measured domain-wide by scripts/compare_sources_domain.py):
+#
+#   * WorldCover calls 90% of this domain grassland (z0 0.03 m); NLCD calls 65%
+#     of it shrub/scrub (z0 0.10 m). Domain-mean z0 is 47% higher under NLCD.
+#     That is the dominant difference and it affects nearly every pixel.
+#   * WorldCover flags 18,111 px built-up at a flat z0 of 0.8 m; NLCD gives the
+#     same pixels a median of 0.25 m, and produces 8x fewer isolated single-pixel
+#     z0 spikes (0.20% vs 1.60% of the domain).
+#
+# The first effect should shift bulk wind speed; the second should remove
+# localised dipoles. They are separable in the output because they act at
+# different scales.
+#
+# Note this is NOT a claim that NLCD is the better input. FuXi-CFD was trained on
+# WorldCover-derived roughness, so NLCD is simultaneously more accurate on the
+# ground and further from the training distribution. Only validation against the
+# WRF profiles settles that -- see configs/wsw_validate.yaml.
+
+name: wsw_domain_nlcd
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/wsw/control/processed/wsw/control.h5
+
+time:
+  start: null
+  end: null
+  stride: 1          # full 10-min cadence
+  limit: null
+
+tiling:
+  mode: domain
+  working_crs: auto
+  stride_m: 6000     # 3 km overlap
+  max_tiles: null
+  bbox:
+     min_lon: -105.57
+     min_lat:   33.8
+     max_lon: -105.3
+     max_lat:   34.48
+
+terrain:
+  dem_mode: recentered
+  roughness_mode: absolute
+  # The only line that differs from wsw_domain.yaml.
+  landcover_source: nlcd
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+  read_block: 822
+
+output:
+  path: /scratch/moptis/fuxicfd/out/wsw_domain_nlcd_box.zarr
+  dtype: float16
+  variables: [u, v]
+  levels: [80.0, 100.0, 120.0, 160.0]
+  time_chunk: 24
+  mosaic: false
