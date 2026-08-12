@@ -1,18 +1,25 @@
 """Print cost and storage estimates for one or more run configs.
 
     python scripts/sizing.py configs/*.yaml
+    python scripts/sizing.py configs/wsw_domain.yaml --bbox -105.8 34.3 -105.2 34.8
 
 GPU time here is cheap and storage is not, which is the whole point of looking
 before launching: a full-domain sweep over the entire time series costs under
 three GPU-days but well over 100 TB.
+
+`--bbox MIN_LON MIN_LAT MAX_LON MAX_LAT` overrides `tiling.bbox` for the estimate
+only, so you can price a few candidate areas against an existing config before
+committing one to YAML. Cost is linear in tile count, so this is normally the
+largest single lever available.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
-from fuxicfd_wrf.config import RunConfig
+from fuxicfd_wrf.config import BBox, RunConfig
 from fuxicfd_wrf.pipeline import plan
 
 #: Measured on one H100, batch 4-16 (see README).
@@ -20,11 +27,24 @@ TILE_STEPS_PER_SEC = 42.0
 
 
 def main(argv: list[str]) -> int:
-    if not argv:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("configs", nargs="*", type=Path)
+    ap.add_argument("--bbox", nargs=4, type=float, default=None,
+                    metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"),
+                    help="override tiling.bbox for this estimate only")
+    args = ap.parse_args(argv)
+    if not args.configs:
         print(__doc__)
         return 1
-    for path in argv:
+
+    for path in args.configs:
         cfg = RunConfig.from_yaml(path)
+        if args.bbox is not None:
+            if cfg.tiling.mode != "domain":
+                raise SystemExit(f"{path.name}: --bbox needs tiling.mode='domain'")
+            cfg.tiling.bbox = BBox(min_lon=args.bbox[0], min_lat=args.bbox[1],
+                                   max_lon=args.bbox[2], max_lat=args.bbox[3])
         d = plan(cfg)
         n_inf = d["n_tiles"] * d["n_times"]
         gpu_h = n_inf / TILE_STEPS_PER_SEC / 3600

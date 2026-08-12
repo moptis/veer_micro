@@ -137,6 +137,28 @@ precision is precision the model never had.
 Zarr has no locking, so `shard_bounds` splits work on chunk boundaries and
 `write_block` rejects any straddling write.
 
+**Land cover → roughness.** `terrain.landcover_source` defaults to `auto`: NLCD
+where it has coverage (CONUS/AK/HI, 30 m), ESA WorldCover elsewhere (global,
+10 m). NLCD is preferred wherever it exists because WorldCover has a *single*
+built-up class spanning everything from a farm track to a city centre, and our
+lookup sends all of it to an urban z₀ of 0.8 m. Against grassland at 0.03 m that
+is a 3.8σ step across one 30 m pixel, and it produced localised wind dipoles with
+no terrain behind them. NLCD resolves four development intensities and gives the
+same pixels a median z₀ of 0.25 m; domain-wide on WSW it yields **8× fewer
+isolated z₀ spikes** (0.20% of pixels vs 1.60%).
+
+The honest caveat: FuXi-CFD was *trained* on WorldCover-derived roughness, so
+NLCD is simultaneously more accurate on the ground and further from the training
+distribution. And the two disagree about far more than the speckle — on WSW,
+WorldCover calls 90% of the domain grassland while NLCD calls 65% of it
+shrub/scrub, a **47% shift in domain-mean z₀** affecting nearly every pixel.
+`scripts/compare_sources_domain.py` measures both effects for any run; Phase 0
+against the WRF profiles is what settles which input is better.
+
+Pin the source explicitly on any config whose store already exists — `auto` is
+resolved at run time, so a config left on `auto` can rebuild a store with
+different terrain than it originally had.
+
 ## Performance
 
 Measured on one H100 (batch 4–16 all saturate):
@@ -203,6 +225,53 @@ Set `output.levels` to exact model heights:
 Since the GPU cost is identical either way and you can't cheaply re-run, keeping
 ~5 rotor-spanning levels is usually the better trade than 1 — shear needs two
 levels and turbulence intensity needs `k`.
+
+### Restricting the area: `tiling.bbox`
+
+Levels trade storage only. **Area trades both** — cost and storage are linear in
+tile count — so if you don't need 30 m across the whole coarse domain, this is
+the biggest lever there is:
+
+```yaml
+tiling:
+  mode: domain
+  stride_m: 6000
+  bbox:                 # lon/lat degrees
+    min_lon: -105.65
+    min_lat:   34.40
+    max_lon: -105.32
+    max_lat:   34.67
+```
+
+```
+wsw_domain.yaml, full        238 tiles   82.7 H100-hours   18.0 TB
+wsw_domain.yaml + 30 km bbox  36 tiles   12.5 H100-hours    2.7 TB
+```
+
+Price candidate areas without editing YAML:
+
+```bash
+python scripts/sizing.py configs/wsw_domain.yaml --bbox -105.65 34.40 -105.32 34.67
+```
+
+Two properties worth knowing:
+
+- **Tiles are filtered from the full-domain lattice, not re-originated on the
+  box.** A subset run keeps the same tile centres and the same tile ids as the
+  full run, so the two stores stay directly comparable and a subset can be
+  dropped into an existing store without realigning anything.
+- **Selection is by tile *core*, not by the 9 km footprint.** At `stride_m:
+  6000` the core is the 6 km square that survives the 1.5 km edge trim, so the
+  selected set is the minimal one that still fully covers the box. Selecting on
+  the footprint would pull in a ring of tiles whose contribution is entirely
+  discarded downstream.
+
+The covered area comes out slightly *larger* than requested — tile cores are
+rectangles in UTM and the box is in lon/lat, and the selection rounds outward.
+Erring toward one extra tile is safe; erring inward puts a hole in the middle of
+a deliverable, and nothing downstream reports it. A bbox that reaches outside the
+domain fails at setup with the reachable lon/lat range in the error, rather than
+silently returning fewer tiles.
 
 ## WRG export
 

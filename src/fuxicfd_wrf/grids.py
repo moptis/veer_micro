@@ -242,16 +242,57 @@ class DomainGeometry:
             and (col >= -eps).all() and (col <= ncol - 1 + eps).all()
         )
 
+    def core_bounds(self, tile: Tile, stride_m: float) -> tuple[float, float, float, float]:
+        """The part of `tile` that survives into a mosaic or WRG, in projected m.
+
+        FuXi-CFD gets no buffer around its 9 km window and its outer ~1.5 km is
+        1.9x noisier, so overlapping runs keep only a `stride_m` square about the
+        centre -- which at stride < 9000 tessellates exactly. With no overlap the
+        core is the whole footprint.
+        """
+        h = min(stride_m, TILE_SPAN_M) / 2
+        return (tile.x - h, tile.y - h, tile.x + h, tile.y + h)
+
+    def core_lonlat_bounds(self, tile: Tile, stride_m: float):
+        """Geographic bbox of a tile's core.
+
+        The core is a rectangle in the projected CRS, so in lon/lat it is a
+        slightly rotated quad; its axis-aligned bbox is marginally larger. That
+        over-inclusion is deliberate -- erring toward one extra tile is safe,
+        while erring the other way leaves a hole in the middle of a deliverable.
+        """
+        minx, miny, maxx, maxy = self.core_bounds(tile, stride_m)
+        tf = pyproj.Transformer.from_crs(self.crs, GEOGRAPHIC_CRS, always_xy=True)
+        lon, lat = tf.transform(
+            np.array([minx, minx, maxx, maxx]), np.array([miny, maxy, miny, maxy])
+        )
+        return float(lon.min()), float(lat.min()), float(lon.max()), float(lat.max())
+
     def make_tiles(
         self,
         *,
         stride_m: float = TILE_SPAN_M,
         prefix: str = "t",
+        bbox: tuple[float, float, float, float] | None = None,
     ) -> list[Tile]:
         """Lay out a regular tile grid covering the domain.
 
         `stride_m` < 9000 produces overlapping tiles for mosaic blending; the
         default is edge-to-edge with no overlap.
+
+        `bbox` is `(min_lon, min_lat, max_lon, max_lat)` and restricts the result
+        to tiles whose **core** intersects that box -- i.e. the minimal set that
+        still fully covers the requested area once edges are trimmed. Two
+        properties matter here:
+
+        * The lattice is **not** re-originated on the bbox. Tiles are generated
+          over the whole domain and then filtered, so a subset run lands on the
+          same centres and keeps the same tile ids as the full-domain run. A
+          bbox store and a full store are therefore directly comparable, and a
+          bbox run can be dropped into an existing store without realigning.
+        * Selection uses the core rather than the 9 km footprint. Using the
+          footprint would pull in a ring of tiles whose contribution is entirely
+          discarded by the 1.5 km trim.
         """
         dminx, dminy, dmaxx, dmaxy = self.extent
         h = COARSE_HALF_EXTENT_M
@@ -261,8 +302,15 @@ class DomainGeometry:
         for j, ty in enumerate(ys[::-1]):  # north-to-south, so tile row 0 is north
             for i, tx in enumerate(xs):
                 tile = Tile(tile_id=f"{prefix}_{j:03d}_{i:03d}", x=float(tx), y=float(ty), crs=self.crs)
-                if self.covers_stencil(tile):
-                    tiles.append(tile)
+                if not self.covers_stencil(tile):
+                    continue
+                if bbox is not None:
+                    tminlon, tminlat, tmaxlon, tmaxlat = self.core_lonlat_bounds(tile, stride_m)
+                    minlon, minlat, maxlon, maxlat = bbox
+                    if (tmaxlon < minlon or tminlon > maxlon
+                            or tmaxlat < minlat or tminlat > maxlat):
+                        continue
+                tiles.append(tile)
         return tiles
 
     def tile_at_lonlat(self, lon: float, lat: float, tile_id: str = "site") -> Tile:

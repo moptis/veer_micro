@@ -55,10 +55,42 @@ def build_tiles(cfg: RunConfig, geom: DomainGeometry) -> list[Tile]:
                 f"4 km of margin on every side): {rejected}"
             )
         return tiles
-    tiles = geom.make_tiles(stride_m=cfg.tiling.stride_m)
+    stride = cfg.tiling.stride_m
+    tiles = geom.make_tiles(stride_m=stride)
+    if cfg.tiling.bbox is not None:
+        bbox = cfg.tiling.bbox.as_tuple()
+        n_full = len(tiles)
+        tiles = geom.make_tiles(stride_m=stride, bbox=bbox)
+        if not tiles:
+            # An empty list alone does not distinguish "your box is outside the
+            # domain" from "it is inside but too close to the edge for a 9x9
+            # stencil", and those need different fixes. Report the reachable
+            # range so the answer is in the error.
+            full = geom.make_tiles(stride_m=stride)
+            lo0, la0, lo1, la1 = _tiles_lonlat_extent(geom, full, stride)
+            raise ValueError(
+                f"tiling.bbox selected 0 tiles.\n"
+                f"  requested : lon {bbox[0]:.4f}..{bbox[2]:.4f}  "
+                f"lat {bbox[1]:.4f}..{bbox[3]:.4f}\n"
+                f"  available : lon {lo0:.4f}..{lo1:.4f}  lat {la0:.4f}..{la1:.4f}\n"
+                f"The available range is what the {len(full)} tiles fitting a full "
+                f"9x9 km stencil inside the WRF domain cover, so it is inset ~4.5 km "
+                f"from the domain edge."
+            )
+        lo0, la0, lo1, la1 = _tiles_lonlat_extent(geom, tiles, stride)
+        print(f"[tiles] bbox selected {len(tiles)} of {n_full} domain tiles; "
+              f"covering lon {lo0:.4f}..{lo1:.4f}  lat {la0:.4f}..{la1:.4f}")
     if cfg.tiling.max_tiles:
         tiles = tiles[: cfg.tiling.max_tiles]
     return tiles
+
+
+def _tiles_lonlat_extent(geom: DomainGeometry, tiles: list[Tile], stride_m: float):
+    """Geographic extent actually covered by a tile list's cores."""
+    if not tiles:
+        return (float("nan"),) * 4
+    b = np.array([geom.core_lonlat_bounds(t, stride_m) for t in tiles])
+    return float(b[:, 0].min()), float(b[:, 1].min()), float(b[:, 2].max()), float(b[:, 3].max())
 
 
 @dataclass

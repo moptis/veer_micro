@@ -33,6 +33,43 @@ class SiteTile(BaseModel):
     lat: float
 
 
+class BBox(BaseModel):
+    """A geographic bounding box, in degrees.
+
+    Used to run only the part of a WRF domain you actually need at 30 m. The
+    coarse domain is usually far larger than the area of interest, and inference
+    cost is linear in tile count, so this is normally the single biggest lever on
+    run cost.
+    """
+
+    min_lon: float
+    min_lat: float
+    max_lon: float
+    max_lat: float
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.min_lon >= self.max_lon:
+            raise ValueError(
+                f"bbox min_lon ({self.min_lon}) must be < max_lon ({self.max_lon})"
+            )
+        if self.min_lat >= self.max_lat:
+            raise ValueError(
+                f"bbox min_lat ({self.min_lat}) must be < max_lat ({self.max_lat})"
+            )
+        # Catches the classic swapped-argument mistake before it silently returns
+        # zero tiles half an hour into a job.
+        for name, v, lim in (("min_lon", self.min_lon, 180), ("max_lon", self.max_lon, 180),
+                             ("min_lat", self.min_lat, 90), ("max_lat", self.max_lat, 90)):
+            if not -lim <= v <= lim:
+                raise ValueError(f"bbox {name}={v} is out of range for degrees "
+                                 f"(expected -{lim}..{lim}); lon/lat swapped?")
+        return self
+
+    def as_tuple(self) -> tuple[float, float, float, float]:
+        return (self.min_lon, self.min_lat, self.max_lon, self.max_lat)
+
+
 class TilingConfig(BaseModel):
     mode: Literal["sites", "domain"] = "sites"
     #: Projected CRS tiles are laid out in. "auto" picks the UTM zone containing
@@ -42,12 +79,22 @@ class TilingConfig(BaseModel):
     sites: list[SiteTile] = Field(default_factory=list)
     #: mode="domain": tile centre spacing. Less than 9000 m gives overlap for blending.
     stride_m: float = TILE_SPAN_M
+    #: mode="domain": restrict to tiles whose core intersects this lon/lat box.
+    #: The tile lattice is unchanged -- tiles are filtered, not re-originated --
+    #: so a subset run keeps the same centres and ids as the full-domain run and
+    #: the two stores stay directly comparable.
+    bbox: BBox | None = None
     max_tiles: int | None = None
 
     @model_validator(mode="after")
     def _check(self):
         if self.mode == "sites" and not self.sites:
             raise ValueError("tiling.mode='sites' requires a non-empty tiling.sites list")
+        if self.mode == "sites" and self.bbox is not None:
+            raise ValueError(
+                "tiling.bbox applies to mode='domain'; in mode='sites' the tiles "
+                "are already given explicitly by tiling.sites"
+            )
         if self.stride_m <= 0 or self.stride_m > TILE_SPAN_M:
             raise ValueError(f"tiling.stride_m must be in (0, {TILE_SPAN_M}]")
         return self
