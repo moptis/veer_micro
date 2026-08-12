@@ -107,8 +107,14 @@ def build_terrain(
         path = _cache(src)
         if path.exists() and not force:
             with np.load(path) as z:
+                # z0 is DERIVED from the cached classes, never read back from
+                # the cache. The classes are the downloaded data; z0 is a
+                # function of a table that can change under them, so a cached z0
+                # can be stale while the classes beside it are still correct.
                 return TerrainTile(
-                    tile_id=tile.tile_id, dem=z["dem"], roughness=z["roughness"],
+                    tile_id=tile.tile_id, dem=z["dem"],
+                    roughness=rough_mod.classes_to_z0(
+                        z["landcover"], src),
                     landcover=z["landcover"], source=src,
                 )
 
@@ -169,6 +175,16 @@ def apply_modes(
     return dem, z0
 
 
+def _z0_source(landcover_source: str) -> str:
+    """Which z0 table a landcover_source will end up using, for cache keying.
+
+    "auto" resolves per tile, so key it on NLCD -- the table it takes wherever it
+    has coverage. A WorldCover fallback tile is then keyed slightly pessimistically,
+    which costs a rebuild and never a wrong answer.
+    """
+    return "worldcover" if landcover_source == "worldcover" else "nlcd"
+
+
 def static_channels(
     tile: Tile,
     in_stats: dict,
@@ -188,6 +204,11 @@ def static_channels(
         key += f"-ds{roughness_despeckle}"
     if landcover_source != "worldcover":
         key += f"-{landcover_source}"
+    # The z0 values are part of this tensor's identity, so the key carries a hash
+    # of the table actually used. A key naming only the source cannot tell that
+    # the values behind it changed, and would have handed back tensors built with
+    # the old table when UL's values replaced them.
+    key += f"-z{rough_mod.table_fingerprint(_z0_source(landcover_source))}"
     path = cache_dir / f"{tile.tile_id}_static_{key}.npy"
 
     if path.exists() and not force:

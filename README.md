@@ -155,9 +155,28 @@ shrub/scrub, a **47% shift in domain-mean z₀** affecting nearly every pixel.
 `scripts/compare_sources_domain.py` measures both effects for any run; Phase 0
 against the WRF profiles is what settles which input is better.
 
-Pin the source explicitly on any config whose store already exists — `auto` is
-resolved at run time, so a config left on `auto` can rebuild a store with
-different terrain than it originally had.
+**Table provenance.** `NLCD_Z0` is UL's table — external reference values. The
+repo originally shipped an in-house set assigned by analogy with WAsP roughness
+classes, with no source recorded; it has been removed. It was not a small
+difference: it put grassland at 0.03 against UL's 0.06 while both agree on
+shrub/scrub at 0.10, and those two classes cover 92% of WSW — so it imposed
+**roughly double the roughness contrast** across nearly the whole domain
+(`std(ln z₀)` 0.79 vs 0.64). Flow response scales with log z₀, so that alone
+changed how sensitive a run appeared to land cover, independently of the model.
+
+`WORLDCOVER_Z0` has *not* had the same treatment and is still analogy-assigned.
+It is kept because WorldCover is the global fallback and what FuXi-CFD trained
+on, but it carries no more provenance than the table that was removed.
+
+Two things to pin or key, both learned the hard way:
+
+- **Pin `landcover_source` on any config whose store already exists.** `auto`
+  resolves at run time, so a config left on `auto` can rebuild a store with
+  different terrain than it originally had.
+- **Derived terrain is cached, and the cache key carries a hash of the z₀ values**
+  (`roughness.table_fingerprint`). A key naming only the *source* cannot see that
+  the values behind it changed, and would serve tensors built with the old table.
+  Editing any z₀ now invalidates the cache automatically.
 
 ## Performance
 

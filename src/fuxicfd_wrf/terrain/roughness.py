@@ -1,13 +1,28 @@
-"""Surface roughness length from ESA WorldCover land cover.
+"""Surface roughness length from land-cover classes.
 
-FuXi-CFD wants z0 in metres on the 30 m grid. WorldCover gives 10 m land-cover
-*classes*, so a lookup table bridges them. The values below are the conventional
-wind-energy z0 assignments (WAsP-style roughness classes).
+FuXi-CFD wants z0 in metres on the 30 m grid; the land-cover products give
+classes, so a lookup table bridges them.
 
-Caveat worth carrying: a class -> z0 table is a coarse instrument. Real z0 varies
-with crop stage, canopy height and season, none of which WorldCover encodes. It is
-what the FuXi-CFD authors describe using, so it is the right choice for matching
-their input distribution -- but do not read the resulting z0 field as ground truth.
+**Provenance is uneven between the two tables -- read this before trusting a
+number.**
+
+NLCD_Z0 is UL's table: external reference values, not assignments made here. The
+repo originally shipped a set assigned by analogy with WAsP-style roughness
+classes, with no source recorded. That set has been removed. It mattered: it put
+grassland at 0.03 against UL's 0.06 while both agree on shrub/scrub at 0.10, and
+those two classes cover 92% of the WSW domain -- so it imposed roughly double the
+roughness *contrast* across nearly the whole area, ln(0.10/0.03)=1.20 against
+ln(0.10/0.06)=0.51. Since flow response scales with the log of z0, that alone
+changed how sensitive a run appeared to land cover, independently of the model.
+
+WORLDCOVER_Z0 has NOT had the same treatment and is still the original
+analogy-assigned set. It is kept because WorldCover is the global fallback and
+what FuXi-CFD was trained on, but it carries no more provenance than the NLCD
+table that was just removed. Do not read it as a reference.
+
+Caveat applying to any such table: a class -> z0 lookup is a coarse instrument.
+Real z0 varies with crop stage, canopy height and season, none of which the class
+encodes. Do not read the resulting field as ground truth.
 """
 
 from __future__ import annotations
@@ -32,35 +47,35 @@ WORLDCOVER_Z0 = {
 #: Used where a pixel carries a code outside the table.
 FALLBACK_Z0 = 0.03
 
-#: NLCD class code -> roughness length z0 (m).
+#: NLCD class code -> roughness length z0 (m). Sourced from UL's table.
 #:
-#: The four developed classes are the reason to prefer NLCD over WorldCover here.
-#: WorldCover has a single "built-up" class that we map to 0.8 m; NLCD separates
-#: verges and lawns (21, <20% impervious) from genuine urban fabric (24), and on
-#: the Broadview tile 75% of WorldCover's "built-up" pixels are class 21. Mapping
-#: those to 0.05 rather than 0.8 removes a 3.8-sigma single-pixel spike from the
-#: model's input.
+#: These are external reference values, not assignments made here -- which is the
+#: whole reason they replaced the repo's original set. Relative to those, this
+#: table is floored higher on vegetated land (0.05-0.06 rather than 0.03-0.04),
+#: rates developed open space far rougher (0.2 vs 0.05), and is somewhat rougher
+#: in forest and wetland: a narrower dynamic range, and a much smaller
+#: grass/shrub contrast.
 NLCD_Z0 = {
     11: 0.0002,  # open water
-    12: 0.001,   # perennial ice/snow
-    21: 0.05,    # developed, open space   -- lawns, verges, roadside
-    22: 0.25,    # developed, low intensity
-    23: 0.50,    # developed, medium intensity
-    24: 1.00,    # developed, high intensity
+    12: 0.003,   # perennial ice/snow
+    21: 0.20,    # developed, open space
+    22: 0.30,    # developed, low intensity
+    23: 0.55,    # developed, medium intensity
+    24: 0.75,    # developed, high intensity
     31: 0.01,    # barren land
-    41: 0.80,    # deciduous forest
-    42: 0.90,    # evergreen forest
-    43: 0.85,    # mixed forest
-    51: 0.03,    # dwarf scrub (AK)
+    41: 0.90,    # deciduous forest
+    42: 1.125,   # evergreen forest
+    43: 0.90,    # mixed forest
+    51: 0.05,    # dwarf scrub (AK)
     52: 0.10,    # shrub/scrub
-    71: 0.03,    # grassland/herbaceous
-    72: 0.03,    # sedge/herbaceous (AK)
+    71: 0.06,    # grassland/herbaceous
+    72: 0.06,    # sedge/herbaceous (AK)
     73: 0.01,    # lichens
     74: 0.01,    # moss
-    81: 0.04,    # pasture/hay
+    81: 0.06,    # pasture/hay
     82: 0.06,    # cultivated crops
-    90: 0.40,    # woody wetlands
-    95: 0.05,    # emergent herbaceous wetlands
+    90: 0.66,    # woody wetlands
+    95: 0.15,    # emergent herbaceous wetlands
 }
 
 NLCD_CLASS_NAMES = {
@@ -87,6 +102,24 @@ CLASS_NAMES = {
 
 Z0_TABLES["worldcover"] = WORLDCOVER_Z0
 CLASS_NAME_TABLES["worldcover"] = CLASS_NAMES
+
+
+def table_fingerprint(source: str) -> str:
+    """Short hash of a source's z0 values, for cache keys.
+
+    Derived terrain (the normalized static tensor) is cached on disk, so editing
+    any z0 value silently invalidates every cached tile -- and a key naming only
+    the *source* cannot see that. Hashing the values themselves means a table
+    edit auto-invalidates without anyone remembering to bump a version, which is
+    exactly the failure that swapping in UL's table would otherwise have caused.
+    """
+    import hashlib
+
+    table = Z0_TABLES.get(source)
+    if table is None:
+        raise ValueError(f"unknown land-cover source {source!r}")
+    blob = ";".join(f"{k}={table[k]!r}" for k in sorted(table))
+    return hashlib.sha1(blob.encode()).hexdigest()[:8]
 
 
 def classes_to_z0(landcover: np.ndarray, source: str = "worldcover") -> np.ndarray:

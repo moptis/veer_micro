@@ -14,15 +14,23 @@ from fuxicfd_wrf.terrain.roughness import (
 def test_developed_classes_are_ordered_by_intensity():
     """The whole point of NLCD here: development is a gradient, not a switch.
 
-    WorldCover's single built-up class forced rural verges to the urban z0 of
-    0.8 m, producing 3.8-sigma single-pixel spikes in the model's input.
+    WorldCover's single built-up class sends everything from a farm track to a
+    city centre to one z0, producing single-pixel spikes in the model's input.
+    Whatever table is in use, NLCD must at least resolve that into a monotone
+    gradient with open space well below the blanket value.
+
+    The margin is deliberately loose. This assertion originally demanded open
+    space be >10x below WorldCover's 0.8, which was really a restatement of the
+    unsourced legacy value of 0.05. UL puts it at 0.20 -- a 4x reduction, not
+    16x -- so the strong form was asserting a guess, not a property.
     """
     z = [NLCD_Z0[c] for c in (21, 22, 23, 24)]
     assert z == sorted(z), "z0 must increase with development intensity"
-    assert z[0] < WORLDCOVER_Z0[50] / 10, (
-        "developed-open-space must be far below WorldCover's blanket built-up value"
+    assert z[0] < WORLDCOVER_Z0[50] / 2, (
+        "developed-open-space must sit meaningfully below WorldCover's blanket "
+        "built-up value, or NLCD buys nothing at the speckle"
     )
-    assert z[-1] >= WORLDCOVER_Z0[50], "high-intensity urban should be at least as rough"
+    assert z[-1] > z[0] * 2, "the developed gradient must actually span a range"
 
 
 def test_every_class_has_a_name_and_a_z0():
@@ -58,3 +66,46 @@ def test_url_shape():
     u = nlcd.url_for(2023)
     assert u.startswith("/vsis3/usgs-landcover/")
     assert "Annual_NLCD_LndCov_2023_CU_C1V0.tif" in u
+
+
+# --- z0 table provenance and cache keying ------------------------------------
+
+def test_grassland_and_shrub_carry_ULs_values():
+    """The pairing that dominates US domains, and the reason the table changed.
+
+    The removed in-house table put grassland at 0.03 while agreeing with UL on
+    shrub/scrub at 0.10 -- roughly double the roughness contrast across the two
+    classes covering 92% of WSW. Pinning both guards against drifting back.
+    """
+    import numpy as np
+    from fuxicfd_wrf.terrain.roughness import classes_to_z0
+
+    z = classes_to_z0(np.array([[52, 71]], dtype=np.int32), "nlcd")
+    assert (z[0, 0], z[0, 1]) == (np.float32(0.10), np.float32(0.06))
+    assert np.log(z[0, 0] / z[0, 1]) < 0.6
+
+
+def test_fingerprint_changes_when_a_z0_value_changes():
+    """Derived terrain is cached on disk, so the cache key must see value edits.
+
+    Keying on the source name alone is what would have served tensors built with
+    the old table after UL's values replaced them.
+    """
+    from fuxicfd_wrf.terrain import roughness as R
+
+    before = R.table_fingerprint("nlcd")
+    original = R.NLCD_Z0[71]
+    try:
+        R.NLCD_Z0[71] = original + 0.01
+        assert R.table_fingerprint("nlcd") != before
+    finally:
+        R.NLCD_Z0[71] = original
+    assert R.table_fingerprint("nlcd") == before
+    assert R.table_fingerprint("nlcd") != R.table_fingerprint("worldcover")
+
+
+def test_static_cache_key_carries_the_table_fingerprint():
+    import inspect
+    from fuxicfd_wrf.terrain import build
+    src = inspect.getsource(build.static_channels)
+    assert "table_fingerprint" in src
