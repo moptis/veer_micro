@@ -325,17 +325,20 @@ def _elevation_on_grid(grid: WrgGrid, tiles: list[Tile], terrain_cache) -> np.nd
     acc = np.zeros((ny, nx), dtype=np.float64)
     wsum = np.zeros((ny, nx), dtype=np.float64)
     for tile in tiles:
-        # build_terrain keys the raw cache by land-cover source: `{id}_raw.npz`
-        # only for WorldCover, `{id}_raw_{source}.npz` for anything else. Testing
-        # only for the WorldCover name meant every run with `landcover_source:
-        # nlcd` missed here and fell through to a zero elevation column -- the
-        # WRG still wrote, so it failed quietly. The DEM is identical whichever
-        # land-cover raster was fetched, so any of these files serves.
+        # build_terrain names the raw cache `{tile_id}-{geo_key}_raw.npz` for
+        # WorldCover and `{tile_id}-{geo_key}_raw_{source}.npz` otherwise. Both
+        # halves of that stem matter, and both have been got wrong here before:
+        # first the `_{source}` suffix, so every `landcover_source: nlcd` run
+        # missed; then, when geo_key was introduced to stop one domain serving
+        # another's terrain, the `-{geo_key}` infix broke the patterns again and
+        # *every* run missed. Each time the WRG still wrote, with a silently
+        # zeroed elevation column.
+        #
+        # Glob the whole stem so this tracks whatever `_cache` produces rather
+        # than restating it. The DEM is identical whichever land-cover raster was
+        # fetched, so any match serves.
         tile_cache = cache / "tiles"
-        if not (
-            (tile_cache / f"{tile.tile_id}_raw.npz").exists()
-            or any(tile_cache.glob(f"{tile.tile_id}_raw_*.npz"))
-        ):
+        if not any(tile_cache.glob(f"{tile.tile_id}-{tile.geo_key}_raw*.npz")):
             continue
         dem = build_terrain(tile, cache).dem.astype(np.float32)
         smp = _make_sampler(grid, *tile.terrain_axes(), overlap_px=0)

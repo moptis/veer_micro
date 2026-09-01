@@ -73,7 +73,13 @@ def test_elevation_is_returned_row_major(tmp_path, monkeypatch):
                                       np.full_like(dem, 30)),
     )
     (tmp_path / "tiles").mkdir()
-    (tmp_path / "tiles" / "t_raw.npz").write_bytes(b"x")   # existence check only
+    # Name this exactly as `build_terrain._cache` does, geo_key and all. It used
+    # to be `t_raw.npz`, which matched the lookup's glob but not the producer's
+    # output -- so this fixture asserted the convention the *reader* believed in
+    # and could never catch the reader drifting away from the writer. It did not:
+    # the geo_key infix broke the lookup for every real run while this stayed
+    # green. See tests/test_elevation_cache.py.
+    (tmp_path / "tiles" / f"{tile.tile_id}-{tile.geo_key}_raw.npz").write_bytes(b"x")
 
     out = wrg_export._elevation_on_grid(grid, [tile], tmp_path).reshape(ny, nx)
     # x-varying field: rows identical, columns increasing.

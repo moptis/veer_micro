@@ -1,0 +1,57 @@
+# Sector-transfer test run: WSW south, the most rugged 28 x 28 km of the domain.
+#
+# Chosen deliberately -- 624 m of relief (std 117 m) against Broadview's 49-228 m
+# per tile. A terrain-informed model needs terrain signal to exploit, and the
+# Broadview validation had almost none.
+#
+#   fuxicfd-wrf wrg-downscale configs/wsw_south_downscale.yaml
+
+name: wsw_south_downscale
+
+source:
+  path: /home/optism/veer/0_client_work/Pattern/2026_05_WakeMap_WRG_Analysis/results/wsw_south/control_100m.wrg
+  # Verified: this puts the domain at 34.15-34.92 N, 106.03-104.94 W (central
+  # New Mexico), and the elevation column agrees with the terrain there.
+  crs: EPSG:32613
+  speed_bins: 1
+
+tiling:
+  mode: domain
+  stride_m: 6000
+  working_crs: auto          # -> EPSG:32613, so the affine fit is exact
+  affine_fit: global
+  bbox:
+    min_lon: -105.8613
+    min_lat: 34.2007
+    max_lon: -105.5699
+    max_lat: 34.4459
+
+terrain:
+  # NLCD would be better on the ground, but `usgs-landcover` is a requester-pays
+  # bucket and needs AWS credentials this machine does not have. WorldCover is
+  # free, global, and is what FuXi-CFD was trained on -- so for a test run it is
+  # the more in-distribution choice anyway. Note that `auto` would have silently
+  # landed here regardless: `nlcd.covers()` catches every exception and returns
+  # False, so a credentials failure is indistinguishable from "outside CONUS".
+  landcover_source: worldcover
+  cache_root: /home/optism/fuxicfd/cache
+  # NOT optional here. Training DEM was 352 +/- 228 m; this domain is 1540-2469 m,
+  # i.e. +5.2 to +9.3 sigma -- roughly twice Broadview's offset. `recentered`
+  # preserves per-tile relief (what drives the flow response) while putting the
+  # tile mean back inside the distribution the model has seen.
+  dem_mode: recentered
+  roughness_mode: absolute
+
+model:
+  device: auto
+  batch_size: 8
+
+output:
+  path: /home/optism/fuxicfd/out/wsw_south_downscaled_100m.wrg
+  resolution_m: 100.0
+  hub_height: 100.0
+  # ~2000 m elevation, standard atmosphere -> rho ~ 1.01. The 1.225 default
+  # would overstate power density by ~21% here.
+  air_density: 1.01
+  deflect: true
+  save_transfer: true
