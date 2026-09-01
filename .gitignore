@@ -10,3 +10,7 @@ reports/
 #   python scripts/run_notebook.py notebooks/<name>.ipynb
 # Keeping executed outputs put ~1 MB of embedded PNGs in every diff.
 .ipynb_checkpoints/
+
+# WRG exports are build products (~7 MB each at 30 m); regenerate with
+#   fuxicfd-wrf wrg <store>.zarr --out wrg/<name>.wrg
+wrg/

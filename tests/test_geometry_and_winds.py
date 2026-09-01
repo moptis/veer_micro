@@ -16,7 +16,7 @@ from fuxicfd_wrf.grids import COARSE_HALF_EXTENT_M as COARSE_HALF
 from fuxicfd_wrf.grids import DomainGeometry, Tile
 from fuxicfd_wrf.winds import (
     build_stencil_interpolator, grid_convergence_deg, rotate_to_grid,
-    speeddir_to_uv, uv_to_speeddir,
+    speeddir_to_uv, stencil_uv, stencil_winds, uv_to_speeddir,
 )
 
 
@@ -136,6 +136,97 @@ def test_regular_latlon_grid_is_rejected_as_non_affine():
         DomainGeometry(lat.ravel(), lon.ravel())
 
 
+def _curved_domain(nrow: int = 150, ncol: int = 177):
+    """A domain large enough that one global UTM fit is not good enough.
+
+    Laid out regular in a Lambert conformal projection and handed back as lat/lon,
+    which is what WRF actually produces. Viewed in UTM the misfit is a smooth bowl
+    that grows with the square of the domain size: Broadview (106 x 64 km) misses
+    by 10 m, Pattern ph1 (180 x 153 km, reproduced here) by 42.7 m.
+    """
+    import pyproj
+
+    lcc = ("+proj=lcc +lat_1=35.5 +lat_2=35.5 +lat_0=35.45 +lon_0=-101.4 "
+           "+R=6370000 +units=m +no_defs")
+    rr, cc = np.meshgrid(np.arange(nrow), np.arange(ncol), indexing="ij")
+    x = -0.5 * ncol * 1000.0 + 1000.0 * cc
+    y = 0.5 * nrow * 1000.0 - 1000.0 * rr
+    tf = pyproj.Transformer.from_crs(lcc, "EPSG:4326", always_xy=True)
+    lon, lat = tf.transform(x, y)
+    return lat.ravel(), lon.ravel(), (nrow, ncol)
+
+
+def test_large_domain_is_rejected_globally_but_fits_locally():
+    """The guard should send you to a local fit, not to a dead end.
+
+    A 180 x 153 km domain is past what one affine map can represent in UTM, but it
+    is perfectly affine over any 17-cell window. Failing outright would mean no
+    such domain could ever run.
+    """
+    lat, lon, shape = _curved_domain()
+    with pytest.raises(ValueError, match="affine_fit: local"):
+        DomainGeometry(lat, lon, crs="auto", grid_shape=shape)
+
+    geom = DomainGeometry(lat, lon, crs="auto", grid_shape=shape, affine_fit="local")
+    assert geom.affine_residual_m > DomainGeometry.MAX_AFFINE_RESIDUAL_M
+    assert geom.local_residual_m < 1.0
+    assert geom.local_residual_m < geom.affine_residual_m / 10
+
+
+def test_local_fit_puts_the_stencil_where_the_grid_actually_is(monkeypatch):
+    """What the fit is *for*: recovering a node's own index from its coordinates.
+
+    Error here is a positional bias in every interpolated wind value, so this
+    measures the quantity that matters rather than the residual that stands in for
+    it. The global fit is allowed through only to show the size of what it costs.
+    """
+    lat, lon, shape = _curved_domain()
+    monkeypatch.setattr(DomainGeometry, "MAX_AFFINE_RESIDUAL_M", 1e9)
+    glob = DomainGeometry(lat, lon, crs="auto", grid_shape=shape)
+    loc = DomainGeometry(lat, lon, crs="auto", grid_shape=shape, affine_fit="local")
+
+    rows, cols = np.meshgrid(np.arange(0, shape[0], 17), np.arange(0, shape[1], 19),
+                             indexing="ij")
+    x, y = glob.x[rows, cols], glob.y[rows, cols]
+
+    gr, gc = glob.xy_to_rowcol(x, y)
+    lr, lc = loc.xy_to_rowcol(x, y)
+    global_err = np.hypot(gr - rows, gc - cols).max()
+    local_err = np.hypot(lr - rows, lc - cols).max()
+    assert global_err > 0.02          # ~43 m at 1 km spacing
+    assert local_err < 0.002          # ~2 m, the float32 lon/lat floor
+    assert local_err < global_err / 10
+
+
+def test_rowcol_xy_roundtrip_is_consistent_under_a_local_fit():
+    """The two maps must stay mutual inverses, or tiles land off their own grid."""
+    lat, lon, shape = _curved_domain()
+    geom = DomainGeometry(lat, lon, crs="auto", grid_shape=shape, affine_fit="local")
+    rows = np.array([0.0, 40.5, 149.0])
+    cols = np.array([0.0, 88.25, 176.0])
+    r2, c2 = geom.xy_to_rowcol(*geom.rowcol_to_xy(rows, cols))
+    assert np.allclose(rows, r2, atol=1e-6)
+    assert np.allclose(cols, c2, atol=1e-6)
+
+
+def test_local_fit_matches_global_where_global_is_already_valid():
+    """On a domain the global fit handles, switching must not move anything much.
+
+    Broadview and WSW are in that regime, so this pins that `local` is a
+    refinement of `global` and not a different convention.
+    """
+    lat, lon = _synthetic_domain()
+    glob = DomainGeometry(lat, lon)
+    loc = DomainGeometry(lat, lon, affine_fit="local")
+    tile = Tile("t", x=(glob.extent[0] + glob.extent[2]) / 2,
+                y=(glob.extent[1] + glob.extent[3]) / 2)
+    gx, gy = tile.coarse_points()
+    gr, gc = glob.xy_to_rowcol(gx, gy)
+    lr, lc = loc.xy_to_rowcol(gx, gy)
+    # This domain is affine in UTM by construction, so both maps are exact.
+    assert np.hypot(gr - lr, gc - lc).max() < 0.01
+
+
 def test_domain_affine_fit_is_accurate():
     geom = DomainGeometry(*_synthetic_domain())
     assert geom.affine_residual_m < DomainGeometry.MAX_AFFINE_RESIDUAL_M
@@ -238,3 +329,52 @@ def test_batched_apply_matches_single():
     assert out.shape == (5, *COARSE_SHAPE)
     for i in range(5):
         assert np.allclose(out[i], interp.apply(batch[i]))
+
+
+def test_stencil_uv_matches_the_speeddir_path_exactly():
+    """The hoisted-conversion path must be numerically identical, not merely close.
+
+    The run loop converts speed/direction to components once per read block and
+    then calls stencil_uv per tile, instead of re-converting inside the tile loop.
+    That is a pure refactor of where the work happens, so any difference at all
+    means the two paths have diverged.
+    """
+    geom = DomainGeometry(*_synthetic_domain())
+    tile = Tile("t", x=(geom.extent[0] + geom.extent[2]) / 2,
+                y=(geom.extent[1] + geom.extent[3]) / 2)
+    interp = build_stencil_interpolator(geom, tile)
+
+    rng = np.random.default_rng(0)
+    n_pts = geom.grid_shape[0] * geom.grid_shape[1]
+    speed = rng.uniform(0.5, 25.0, (6, n_pts)).astype(np.float32)
+    direction = rng.uniform(0.0, 360.0, (6, n_pts)).astype(np.float32)
+
+    u_old, v_old = stencil_winds(interp, speed, direction)
+    u_new, v_new = stencil_uv(interp, *speeddir_to_uv(speed, direction))
+    assert np.array_equal(u_old, u_new)
+    assert np.array_equal(v_old, v_new)
+
+
+def test_same_tile_id_in_different_domains_gets_a_different_cache_key():
+    """Regression: tile ids repeat across domains, so they cannot key the terrain cache.
+
+    `t_008_010` is a lattice index, not a place. The WSW domain and the Panhandle
+    domain both generate it, and keying the cache on the id alone served 23 tiles of
+    New Mexico DEM (~1900 m) to a Texas site (~1000 m) -- corrupting the model's dem
+    channel, not just the WRG elevation column, with no error anywhere.
+    """
+    wsw = Tile("t_008_010", x=447510.0, y=3786960.0, crs="EPSG:32613")
+    panhandle = Tile("t_008_010", x=255450.0, y=3953100.0, crs="EPSG:32614")
+    assert wsw.tile_id == panhandle.tile_id
+    assert wsw.geo_key != panhandle.geo_key
+
+
+def test_geo_key_is_stable_against_float_noise_but_tracks_real_moves():
+    """A key that changed on rounding noise would silently rebuild terrain forever."""
+    a = Tile("t", x=255450.0, y=3953100.0)
+    b = Tile("t", x=255450.0000001, y=3953099.9999999)
+    assert a.geo_key == b.geo_key
+    assert Tile("t", x=255480.0, y=3953100.0).geo_key != a.geo_key
+    # The CRS is part of the identity: the same numbers mean different places.
+    # (a uses the WORKING_CRS default, so name a different zone explicitly.)
+    assert Tile("t", x=255450.0, y=3953100.0, crs="EPSG:32614").geo_key != a.geo_key

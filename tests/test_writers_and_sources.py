@@ -199,3 +199,42 @@ def test_select_stride_is_in_time_not_file_order():
     rows = src.select(stride=2)
     assert list(rows) == [0, 3, 4]
     assert src.times[rows].is_monotonic_increasing
+
+
+def test_completed_prefix_is_empty_on_a_fresh_store(tmp_path):
+    store, _ = _store(tmp_path, n_times=24, chunk=6)
+    store.create()
+    assert store.completed_prefix(0, 24) == 0
+
+
+def test_completed_prefix_finds_written_blocks_and_redoes_the_last(tmp_path):
+    """Resume must skip finished blocks but never trust the most recent one.
+
+    A task killed mid-write can leave its last chunk truncated, and that only
+    surfaces as a decompression failure at WRG time -- long after the inference
+    has been paid for. Redoing one block is the cheap insurance.
+    """
+    store, _ = _store(tmp_path, n_times=24, chunk=6)
+    store.create()
+    rng = np.random.default_rng(0)
+    block = lambda: {v: rng.normal(size=(6, N_LEVELS, 300, 300)).astype("float32")
+                     for v in ["u", "v", "w", "k"]}
+    for t0 in (0, 6, 12):
+        store.write_block("t0", t0, block())
+
+    # 18 timesteps written; the last block is discounted, so resume at 12.
+    assert store.completed_prefix(0, 24) == 12
+    # A shard starting mid-axis is measured from its own start, not from zero.
+    assert store.completed_prefix(12, 24) == 12
+
+
+def test_completed_prefix_stops_at_the_first_gap(tmp_path):
+    """Only a contiguous prefix counts -- a later stray block must not be skipped over."""
+    store, _ = _store(tmp_path, n_times=24, chunk=6)
+    store.create()
+    rng = np.random.default_rng(1)
+    block = lambda: {v: rng.normal(size=(6, N_LEVELS, 300, 300)).astype("float32")
+                     for v in ["u", "v", "w", "k"]}
+    store.write_block("t0", 0, block())
+    store.write_block("t0", 18, block())     # gap at 6 and 12
+    assert store.completed_prefix(0, 24) == 0

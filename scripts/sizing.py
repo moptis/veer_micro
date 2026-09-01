@@ -22,8 +22,12 @@ from pathlib import Path
 from fuxicfd_wrf.config import BBox, RunConfig
 from fuxicfd_wrf.pipeline import plan
 
-#: Measured on one H100, batch 4-16 (see README).
-TILE_STEPS_PER_SEC = 42.0
+#: Sustained rate of a *production array task*, measured on the 174-tile Panhandle
+#: run. Not the 42 tile-steps/s an idle H100 reaches: gpu-h100 nodes pack four
+#: tasks onto 128 cores, and the CPU stages (preprocess ~15%, postprocess ~27%)
+#: then compete. Sizing off 42 is what under-quoted that run by 2.8x and put every
+#: shard past its wall clock -- see scripts/bench_stages.py for the breakdown.
+TILE_STEPS_PER_SEC = 15.0
 
 
 def main(argv: list[str]) -> int:

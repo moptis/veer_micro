@@ -126,6 +126,28 @@ reapplied as a matmul per timestep. `DomainGeometry` refuses the shortcut above 
 25 m residual rather than degrading quietly — a regular *lat/lon* grid, for
 contrast, misses affine by 203 m.
 
+That residual grows with the square of the domain size, and it is what a big
+domain runs into first:
+
+| domain | extent | global fit | local fit |
+|---|---|---|---|
+| Broadview | 106 × 64 km | 10.25 m | — |
+| WSW | 96 × 114 km | 13.9 m | — |
+| **Pattern ph1** | **180 × 153 km** | **42.7 m — rejected** | **2.86 m** |
+
+`tiling.affine_fit: local` refits the map around each query point over a 17 × 17
+cell window instead of fitting one map to the whole domain. Lambert-vs-UTM misfit
+is a smooth bowl, so locally it is ~0: Pattern ph1 comes down to 2.86 m, which is
+the floor set by the float32 lon/lat in the store — the same number a fit in the
+grid's own Lambert projection gives, i.e. as good as the coordinates allow.
+
+Use it for any domain the guard rejects. It is not the default because it changes
+the interpolation weights everywhere, so a store built under one setting is not
+bit-comparable with one built under the other; on a domain the global fit already
+handles the two agree to well within that fit's own residual. The alternative —
+tiling in the WRF's native Lambert instead of UTM — fits just as well but puts the
+WRG on different coordinates from the coarse deliverables, which is not worth it.
+
 Winds are converted to components **before** interpolation. Averaging direction
 across the 0/360 branch cut is a reliable way to manufacture nonsense.
 
@@ -296,7 +318,7 @@ silently returning fewer tiles.
 
 ```bash
 fuxicfd-wrf wrg <store>.zarr --out site.wrg \
-    --hub-height 100 --resolution 100 \
+    --hub-height 100 \
     --terrain-cache /scratch/$USER/fuxicfd/cache
 ```
 

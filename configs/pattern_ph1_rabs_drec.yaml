@@ -1,0 +1,66 @@
+# Panhandle Wind 1 (Pattern Energy) -- roughness channel ON, over the inner box.
+#
+#   python scripts/sizing.py configs/pattern_ph1_rabs_drec.yaml
+#   ./scripts/launch.sh configs/pattern_ph1_rabs_drec.yaml 32
+#
+# The A/B counterpart to pattern_ph1_rconst_drec.yaml. Identical in every respect
+# except `roughness_mode`, which goes constant -> absolute: the model now sees the
+# real 30 m NLCD-derived z0 instead of the training mean everywhere. dem_mode stays
+# recentered.
+#
+# Because tiles are filtered from the same domain lattice rather than re-originated
+# on the bbox, the tile ids here match the 174-tile run exactly. Every tile in this
+# box has a counterpart in that store differing in exactly one input channel, so the
+# roughness effect is directly measurable tile-for-tile.
+#
+# What to expect, and why it is worth running: with z0 constant the model was shown
+# ~0.82 m (the training mean) over a site nearer 0.05 m, which is the mechanism
+# behind the over-sheared profile -- ~+0.5 m/s at 160 m against WRF. Absolute z0
+# removes that contradiction. The cost is that ~0.05 m normalizes to about -3.8
+# sigma, so the channel is now physically right but well outside the training
+# range, on the input this model is most sensitive to. Which failure is worse is an
+# empirical question; this run is the measurement.
+
+name: pattern_ph1_rabs_drec
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/pattern/ph1/control/processed/pattern/ph1/control.h5
+
+time:
+  start: null
+  end: null
+  stride: 1
+  limit: null
+
+tiling:
+  mode: domain
+  working_crs: auto            # -> EPSG:32614 (UTM 14N), matching the coarse WRGs
+  affine_fit: local            # 180 x 153 km domain: one global fit misses by 42.7 m
+  stride_m: 6000               # 3 km overlap
+  max_tiles: null
+  bbox:
+    min_lon: -101.6372
+    min_lat:   35.3238
+    max_lon: -101.0836
+    max_lat:   35.6246
+
+terrain:
+  dem_mode: recentered
+  roughness_mode: absolute     # the only line that differs from the rconst run
+  landcover_source: nlcd       # pinned: 'auto' could rebuild the store on other data
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+  read_block: 824      # 4 x the 206-row h5 chunk on this store
+
+output:
+  path: /scratch/moptis/fuxicfd/out/pattern_ph1_rabs_drec.zarr
+  dtype: float16
+  variables: [u, v]
+  levels: [80.0, 100.0, 120.0, 160.0]
+  time_chunk: 24
+  mosaic: false

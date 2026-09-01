@@ -118,6 +118,25 @@ class Tile:
         h = COARSE_HALF_EXTENT_M
         return (self.x - h, self.y - h, self.x + h, self.y + h)
 
+    @property
+    def geo_key(self) -> str:
+        """Short hash of what the tile's terrain actually depends on: where it is.
+
+        Tile ids are lattice indices (`t_008_010`) and are NOT unique across
+        domains -- two different WRF domains generate the same ids for entirely
+        different places. Keying the terrain cache on the id alone therefore lets
+        one domain serve another domain's terrain, silently: the Panhandle run
+        reused 23 tiles of New Mexico DEM cached weeks earlier by the WSW run,
+        putting ~1900 m terrain into a ~1000 m site. That corrupts the model's dem
+        channel, not just the WRG elevation column, and nothing downstream checks.
+
+        Rounded to the metre so float noise in the lattice cannot split the key.
+        """
+        import hashlib
+
+        raw = f"{self.crs}|{round(self.x)}|{round(self.y)}"
+        return hashlib.sha1(raw.encode()).hexdigest()[:8]
+
     def lonlat_center(self) -> tuple[float, float]:
         tf = pyproj.Transformer.from_crs(self.crs, GEOGRAPHIC_CRS, always_xy=True)
         return tf.transform(self.x, self.y)
@@ -138,10 +157,31 @@ class DomainGeometry:
     index-space bilinear rather than a triangulation search. The affine residual is
     checked at construction -- if this domain were ever curved enough for that to
     matter, you get an error instead of quiet interpolation bias.
+
+    `affine_fit` decides *where* that map is fitted:
+
+    * ``"global"`` -- one fit over the whole domain. Exact enough for a domain a
+      hundred km across (Broadview 10.3 m, WSW 13.9 m) and the cheapest thing that
+      works, so it stays the default.
+    * ``"local"``  -- refit around each query point over a
+      ``2*LOCAL_FIT_HALF+1`` window. Lambert-vs-UTM misfit is a smooth bowl that
+      grows with domain size, so a global fit degrades quadratically: Pattern
+      ph1 is 180 x 153 km and misses by 42.7 m, past the guard. Locally the same
+      grid fits to 2.6 m, which is the floor set by the float32 lon/lat in the
+      store. Use this for any domain the global fit rejects.
+
+    The two agree to within the global residual, so a store built one way is not
+    bit-comparable with one built the other. That is why this is an explicit
+    setting and not an automatic fallback.
     """
 
     #: Refuse the affine shortcut if any grid node is off by more than this.
     MAX_AFFINE_RESIDUAL_M = 25.0
+
+    #: Half-width, in grid cells, of the window a local fit is made over. 8 gives
+    #: a 17 x 17 cell window -- comfortably larger than the 9 km stencil that is
+    #: the usual query, and small enough that the curvature across it is ~0.
+    LOCAL_FIT_HALF = 8
 
     def __init__(
         self,
@@ -150,7 +190,10 @@ class DomainGeometry:
         *,
         crs: str = WORKING_CRS,
         grid_shape: tuple[int, int] = WRF_GRID_SHAPE,
+        affine_fit: str = "global",
     ):
+        if affine_fit not in ("global", "local"):
+            raise ValueError(f"affine_fit={affine_fit!r} not in ('global', 'local')")
         lat = np.asarray(lat, dtype=np.float64)
         lon = np.asarray(lon, dtype=np.float64)
         n_expected = grid_shape[0] * grid_shape[1]
@@ -165,6 +208,8 @@ class DomainGeometry:
         self.lat = lat.reshape(grid_shape)
         self.lon = lon.reshape(grid_shape)
         self.crs = crs
+        self.affine_fit = affine_fit
+        self._local_cache: dict[tuple[int, int], tuple] = {}
 
         tf = pyproj.Transformer.from_crs(GEOGRAPHIC_CRS, crs, always_xy=True)
         self.x, self.y = tf.transform(self.lon, self.lat)
@@ -186,32 +231,123 @@ class DomainGeometry:
         pred_y = A @ coef_y
         resid = np.hypot(pred_x - self.x.ravel(), pred_y - self.y.ravel())
         self.affine_residual_m = float(resid.max())
-        if self.affine_residual_m > self.MAX_AFFINE_RESIDUAL_M:
-            raise ValueError(
-                f"WRF grid is not affine in {self.crs} to within "
-                f"{self.MAX_AFFINE_RESIDUAL_M} m (max residual "
-                f"{self.affine_residual_m:.1f} m). Use a triangulated interpolator "
-                f"instead of the index-space shortcut."
-            )
 
         # Invert: [x, y] -> [row, col].
         M = self._fwd[:, :2]  # d(x,y)/d(row,col)
         self._inv_M = np.linalg.inv(M)
         self._offset = self._fwd[:, 2]
 
+        # The global map is always built: in local mode it is still the first
+        # guess that says which window to refit around, and rowcol_to_xy uses it.
+        if self.affine_fit == "global":
+            self.local_residual_m = None
+            if self.affine_residual_m > self.MAX_AFFINE_RESIDUAL_M:
+                raise ValueError(
+                    f"WRF grid is not affine in {self.crs} to within "
+                    f"{self.MAX_AFFINE_RESIDUAL_M} m (max residual "
+                    f"{self.affine_residual_m:.1f} m). Set tiling.affine_fit: local "
+                    f"to refit per window, or use a triangulated interpolator."
+                )
+            return
+
+        self.local_residual_m = self._probe_local_residual()
+        if self.local_residual_m > self.MAX_AFFINE_RESIDUAL_M:
+            raise ValueError(
+                f"WRF grid is not affine in {self.crs} to within "
+                f"{self.MAX_AFFINE_RESIDUAL_M} m even over "
+                f"{2 * self.LOCAL_FIT_HALF + 1} x {2 * self.LOCAL_FIT_HALF + 1} cell "
+                f"windows (max residual {self.local_residual_m:.1f} m). This grid "
+                f"needs a triangulated interpolator, not an index-space shortcut."
+            )
+
+    def _local_affine(self, row0: int, col0: int) -> tuple:
+        """Affine map fitted over a window of the grid centred on (row0, col0).
+
+        Returns `(inv_M, offset, residual_m)` in *absolute* index coordinates, so
+        the result is a drop-in replacement for the global map. Cached per window:
+        one tile's 9x9 stencil spans ~9 cells and so reuses a handful of windows,
+        and successive tiles overlap.
+        """
+        nrow, ncol = self.grid_shape
+        h = self.LOCAL_FIT_HALF
+        span_r = min(2 * h + 1, nrow)
+        span_c = min(2 * h + 1, ncol)
+        # Slide the window fully inside the grid rather than truncating it at an
+        # edge -- a lopsided window fits the corner worse than a shifted one.
+        rs = int(np.clip(row0 - h, 0, nrow - span_r))
+        cs = int(np.clip(col0 - h, 0, ncol - span_c))
+        key = (rs, cs)
+        hit = self._local_cache.get(key)
+        if hit is not None:
+            return hit
+
+        rr, cc = np.meshgrid(
+            np.arange(rs, rs + span_r), np.arange(cs, cs + span_c), indexing="ij"
+        )
+        A = np.column_stack([rr.ravel(), cc.ravel(), np.ones(rr.size)])
+        x = self.x[rs:rs + span_r, cs:cs + span_c].ravel()
+        y = self.y[rs:rs + span_r, cs:cs + span_c].ravel()
+        coef_x, *_ = np.linalg.lstsq(A, x, rcond=None)
+        coef_y, *_ = np.linalg.lstsq(A, y, rcond=None)
+        fwd = np.array([coef_x, coef_y])
+        resid = float(np.hypot(A @ coef_x - x, A @ coef_y - y).max())
+        out = (np.linalg.inv(fwd[:, :2]), fwd[:, 2], resid)
+        self._local_cache[key] = out
+        return out
+
+    def _probe_local_residual(self) -> float:
+        """Worst local-window misfit anywhere on the grid.
+
+        Windows are stepped by their half-width so every cell falls inside at
+        least one probed window; the misfit varies smoothly, so this is the same
+        answer a per-cell probe gives at a fraction of the cost.
+        """
+        nrow, ncol = self.grid_shape
+        h = max(self.LOCAL_FIT_HALF, 1)
+        worst = 0.0
+        for r in range(0, nrow, h):
+            for c in range(0, ncol, h):
+                worst = max(worst, self._local_affine(r, c)[2])
+        return worst
+
     def xy_to_rowcol(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Map projected coordinates to fractional (row, col) index space."""
+        """Map projected coordinates to fractional (row, col) index space.
+
+        In `affine_fit="local"` mode the global map only picks the window; the
+        answer comes from an affine refitted around each point's own cell. The
+        refit is per point rather than per call so that a caller passing scattered
+        points (a whole grid, say) gets the same accuracy as one passing a single
+        tile's stencil.
+        """
+        shape = np.shape(x)
         d = np.stack([np.ravel(x) - self._offset[0], np.ravel(y) - self._offset[1]])
         rc = self._inv_M @ d
-        shape = np.shape(x)
-        return rc[0].reshape(shape), rc[1].reshape(shape)
+        if self.affine_fit == "global":
+            return rc[0].reshape(shape), rc[1].reshape(shape)
+
+        fx, fy = np.ravel(x), np.ravel(y)
+        out = np.empty_like(rc)
+        for i, (r_est, c_est) in enumerate(zip(np.rint(rc[0]), np.rint(rc[1]))):
+            inv_M, offset, _ = self._local_affine(int(r_est), int(c_est))
+            out[:, i] = inv_M @ np.array([fx[i] - offset[0], fy[i] - offset[1]])
+        return out[0].reshape(shape), out[1].reshape(shape)
 
     def rowcol_to_xy(self, row: np.ndarray, col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Inverse of `xy_to_rowcol`, fitted the same way so the pair round-trips."""
         row = np.asarray(row, dtype=np.float64)
         col = np.asarray(col, dtype=np.float64)
-        x = self._fwd[0, 0] * row + self._fwd[0, 1] * col + self._fwd[0, 2]
-        y = self._fwd[1, 0] * row + self._fwd[1, 1] * col + self._fwd[1, 2]
-        return x, y
+        if self.affine_fit == "global":
+            x = self._fwd[0, 0] * row + self._fwd[0, 1] * col + self._fwd[0, 2]
+            y = self._fwd[1, 0] * row + self._fwd[1, 1] * col + self._fwd[1, 2]
+            return x, y
+
+        shape = row.shape
+        fr, fc = row.ravel(), col.ravel()
+        out = np.empty((2, fr.size))
+        for i in range(fr.size):
+            inv_M, offset, _ = self._local_affine(int(round(fr[i])), int(round(fc[i])))
+            out[:, i] = np.linalg.inv(inv_M) @ np.array([fr[i], fc[i]]) + offset
+        return out[0].reshape(shape), out[1].reshape(shape)
 
     @property
     def extent(self) -> tuple[float, float, float, float]:

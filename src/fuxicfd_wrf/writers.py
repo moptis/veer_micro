@@ -291,6 +291,35 @@ class TileStore:
                     )
                     _set_attrs(a, **_VAR_ATTRS[var])
 
+    def completed_prefix(self, t_start: int, t_stop: int) -> int:
+        """First time index in [t_start, t_stop) not yet written for every tile.
+
+        A shard writes its blocks in order and writes every tile before moving on,
+        so completed work is a contiguous prefix of the shard's range. That makes
+        resume a matter of finding where the prefix ends rather than tracking a
+        manifest: a chunk file exists only once Zarr has written it, so presence
+        across all tiles and variables means the block is done.
+
+        The last completed block is deliberately NOT counted. A task killed by the
+        wall clock can leave its final chunk truncated, and a truncated chunk reads
+        as a decompression error much later -- at WRG time, after the inference has
+        been paid for. Redoing one block per shard is a few seconds against that.
+        """
+        if not self.path.exists():
+            return t_start
+        done = t_start
+        for t0 in range(t_start, t_stop, self.time_chunk):
+            k = t0 // self.time_chunk
+            if not all(
+                (self.path / tile_id / var / "c" / str(k) / "0" / "0" / "0").exists()
+                for tile_id in self.tiles
+                for var in self.variables
+            ):
+                break
+            done = t0 + self.time_chunk
+        # Step back over the last completed block; never before the shard start.
+        return max(t_start, min(done, t_stop) - self.time_chunk) if done > t_start else t_start
+
     def write_block(self, tile_id: str, t0: int, fields: dict[str, np.ndarray]) -> None:
         """Write `fields` (each (n, n_level, 300, 300)) starting at time index `t0`.
 

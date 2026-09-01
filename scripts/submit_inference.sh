@@ -22,7 +22,7 @@
 #SBATCH --job-name=fuxicfd
 #SBATCH --account=clusterwakes
 #SBATCH --partition=gpu-h100
-#SBATCH --qos=normal
+##SBATCH --qos=standby
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=32
 # 64G, not 120G: measured peak RSS is ~3 GB, and a 120G request caps packing at
@@ -59,7 +59,12 @@ fi
 echo "host=$(hostname) shard=${SHARD}/${NSHARDS} config=${CONFIG}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
+# --resume is always on: it is a no-op on a fresh store, and on a requeue or a
+# relaunch after a wall-clock kill it skips the blocks this shard already wrote.
+# Without it a killed task restarts from zero -- which is how the first Panhandle
+# launch lost 44 GPU-hours.
 srun fuxicfd-wrf run "${CONFIG}" \
     --shard "${SHARD}" \
     --n-shards "${NSHARDS}" \
+    --resume \
     --device cuda

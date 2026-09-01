@@ -1,0 +1,65 @@
+# Panhandle Wind 1 (Pattern Energy), Carson County TX -- FuXi-CFD 30 m
+# downscaling over the turbine box.
+#
+#   python scripts/sizing.py configs/pattern_ph1_rconst_drec.yaml
+#   ./scripts/launch.sh configs/pattern_ph1_rconst_drec.yaml 32
+#
+# Same model configuration as the WSW box run wsw_box_rconst_drec.yaml:
+# dem_mode=recentered, roughness_mode=constant.
+#
+# Two things differ from every earlier config, both forced by this domain:
+#
+#   * `affine_fit: local`. The domain is 180 x 153 km, nearly three times
+#     the WSW domain's area, and Lambert-vs-UTM curvature grows with the square
+#     of that. One global affine misses by 42.7 m -- past DomainGeometry's 25 m
+#     guard -- against 2.9 m refitted per window.
+#   * `read_block: 824`. This store is chunked (206, 208), so the block has to
+#     be a multiple of 206 or every read straddles chunks.
+#
+# Land cover is irrelevant to the model input here (roughness_mode=constant
+# replaces the channel with the training mean), but it is still pinned so the raw
+# terrain cache is built the same way as everywhere else.
+
+name: pattern_ph1_rconst_drec
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/pattern/ph1/control/processed/pattern/ph1/control.h5
+
+time:
+  start: null
+  end: null
+  stride: 1
+  limit: null
+
+tiling:
+  mode: domain
+  working_crs: auto            # -> EPSG:32614 (UTM 14N), matching the coarse WRGs
+  affine_fit: local            # 180 x 153 km domain: one global fit misses by 42.7 m
+  stride_m: 6000               # 3 km overlap
+  max_tiles: null
+  bbox:
+    min_lon: -101.7
+    min_lat:   35.2
+    max_lon: -100.7
+    max_lat:   35.7
+
+terrain:
+  dem_mode: recentered
+  roughness_mode: constant
+  landcover_source: nlcd
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+  read_block: 824      # 4 x the 206-row h5 chunk on this store
+
+output:
+  path: /scratch/moptis/fuxicfd/out/pattern_ph1_rconst_drec.zarr
+  dtype: float16
+  variables: [u, v]
+  levels: [80.0, 100.0, 120.0, 160.0]
+  time_chunk: 24
+  mosaic: false

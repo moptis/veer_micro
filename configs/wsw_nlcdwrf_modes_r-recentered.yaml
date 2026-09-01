@@ -1,0 +1,73 @@
+# Static-channel mode arbitration against the NLCD-forced WRF run.
+#
+#   sbatch scripts/compare_modes_nlcdwrf.sh
+#
+# NOTE ON NAMING -- there are two independent "NLCD" axes in this repo and they
+# are easy to conflate:
+#
+#   * `landcover_source: nlcd`  -- FuXi's *static roughness channel* comes from
+#     NLCD rather than WorldCover. That is what configs/wsw_domain_nlcd.yaml
+#     tests, and both sides of it are driven by the MODIS-forced WRF store.
+#   * this config              -- the *driving WRF winds* come from a run forced
+#     with NLCD land use (wsw_nlcd.h5), instead of wsw/control/.../control.h5
+#     which was forced with MODIS.
+#
+# This file is the second axis. It exists because `validate --compare-modes`
+# arbitrates dem_mode ONLY, holding roughness_mode at whatever the config says
+# (cli.py:142). So roughness_mode has never been tested -- every config carries
+# `absolute` as an untested default -- even though it is the larger of the two
+# offsets: on this domain the roughness channel sits at -3.4 sigma of the
+# training distribution, against +7 sigma for elevation.
+#
+# Running `--compare-modes` against this file and its `-r-recentered` twin gives
+# all four dem_mode x roughness_mode combinations from two invocations, without
+# modifying the validated code path. The two files differ in exactly one line:
+# terrain.roughness_mode.
+#
+# Single tile: UTM 13N (457605, 3815000) = 34.4757 N, 105.4617 W, chosen for
+# strong roughness sensitivity in FuXi-CFD.
+
+name: wsw_nlcdwrf_modes_r-recentered
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/wsw_nlcd/processed/wsw_nlcd.h5
+
+time:
+  start: null
+  end: null
+  # The store's 52560 rows are NOT chronological -- they are stitched from 11
+  # scattered year-chunks (2002-2021) with 7 backward jumps, and the companion
+  # status CSV starts on a different date again. `select()` sorts by parsed
+  # timestamp before striding, so a bare `limit` would take the earliest chunk
+  # (2002) and nothing else. Striding instead spreads the sample over the whole
+  # record: 219 x 240 = 52560 exactly, so `--n-times 240` lands 240 samples
+  # across every chunk. 219 steps = 36.5 h, which is not a multiple of the
+  # 144-step day, so the sample precesses through the diurnal cycle rather than
+  # locking onto one hour.
+  stride: 219
+  limit: null        # validate overrides this with --n-times
+
+tiling:
+  mode: sites
+  working_crs: auto
+  sites:
+    - {id: wsw_rough, lon: -105.4617, lat: 34.4757}
+
+terrain:
+  dem_mode: recentered      # --compare-modes evaluates both regardless
+  roughness_mode: recentered  # <-- the only line that differs from the twin
+  landcover_source: nlcd
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+
+output:
+  path: /scratch/moptis/fuxicfd/out/wsw_nlcdwrf_modes_r-recentered.zarr
+  dtype: float16
+  variables: [u, v, w, k]
+  levels: null
+  time_chunk: 6

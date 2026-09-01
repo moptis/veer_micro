@@ -28,7 +28,14 @@ def main() -> int:
 
     src = H5WrfSource(args.store)
     lat, lon = src.coordinates()
-    geom = DomainGeometry(lat, lon, crs="auto", grid_shape=src.domain_shape)
+    try:
+        geom = DomainGeometry(lat, lon, crs="auto", grid_shape=src.domain_shape)
+    except ValueError as exc:
+        if "not affine" not in str(exc):
+            raise
+        print(f"[geometry] {exc}\n[geometry] describing with affine_fit='local'")
+        geom = DomainGeometry(lat, lon, crs="auto", grid_shape=src.domain_shape,
+                              affine_fit="local")
     minx, miny, maxx, maxy = geom.extent
 
     print("=== geometry ===")
@@ -37,7 +44,9 @@ def main() -> int:
     print(f"  lat/lon         : {lat.min():.4f}..{lat.max():.4f}, "
           f"{lon.min():.4f}..{lon.max():.4f}")
     print(f"  extent          : {(maxx-minx)/1000:.0f} x {(maxy-miny)/1000:.0f} km")
-    print(f"  affine residual : {geom.affine_residual_m:.2f} m")
+    print(f"  affine residual : {geom.affine_residual_m:.2f} m global"
+          + (f", {geom.local_residual_m:.2f} m local" if geom.local_residual_m is not None else ""))
+    print(f"  affine_fit      : {geom.affine_fit}")
     print(f"  tiles @ 9 km    : {len(geom.make_tiles())}")
     print(f"  tiles @ 6 km    : {len(geom.make_tiles(stride_m=6000.0))}")
 

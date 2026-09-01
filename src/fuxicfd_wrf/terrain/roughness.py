@@ -6,14 +6,18 @@ classes, so a lookup table bridges them.
 **Provenance is uneven between the two tables -- read this before trusting a
 number.**
 
-NLCD_Z0 is UL's table: external reference values, not assignments made here. The
-repo originally shipped a set assigned by analogy with WAsP-style roughness
-classes, with no source recorded. That set has been removed. It mattered: it put
-grassland at 0.03 against UL's 0.06 while both agree on shrub/scrub at 0.10, and
-those two classes cover 92% of the WSW domain -- so it imposed roughly double the
-roughness *contrast* across nearly the whole area, ln(0.10/0.03)=1.20 against
-ln(0.10/0.06)=0.51. Since flow response scales with the log of z0, that alone
-changed how sensitive a run appeared to land cover, independently of the model.
+NLCD_Z0 is now derived from WRF's own VEGPARM.TBL, so the static channel and the
+WRF winds driving the model describe the same surface. It previously held UL's
+table (kept as NLCD_Z0_UL), which was a sourced external reference but disagreed
+sharply with WRF: 2.25x on evergreen forest, and more than 2x on domain-mean z0
+across WSW (0.124 m against WRF's 0.055 m). Since flow response scales with the
+log of z0, a table disagreement of that size changes how sensitive a run appears
+to land cover independently of the model, which is exactly what it did.
+
+Note this is a choice, not a correction. Matching WRF buys pipeline consistency
+and costs distance from FuXi-CFD's training convention -- the model learned
+roughness from WorldCover, where tree cover is 0.75 m, between WRF's 0.50 and
+UL's 1.125. Validate against observations rather than assuming.
 
 WORLDCOVER_Z0 has NOT had the same treatment and is still the original
 analogy-assigned set. It is kept because WorldCover is the global fallback and
@@ -47,35 +51,62 @@ WORLDCOVER_Z0 = {
 #: Used where a pixel carries a code outside the table.
 FALLBACK_Z0 = 0.03
 
-#: NLCD class code -> roughness length z0 (m). Sourced from UL's table.
+#: NLCD class code -> roughness length z0 (m), derived from WRF's own land-use
+#: table so the static channel and the driving winds agree on the surface.
 #:
-#: These are external reference values, not assignments made here -- which is the
-#: whole reason they replaced the repo's original set. Relative to those, this
-#: table is floored higher on vegetated land (0.05-0.06 rather than 0.03-0.04),
-#: rates developed open space far rougher (0.2 vs 0.05), and is somewhat rougher
-#: in forest and wetland: a narrower dynamic range, and a much smaller
-#: grass/shrub contrast.
+#: Each value is the midpoint of Z0MIN/Z0MAX in the NLCD40 section of WRF's
+#: VEGPARM.TBL, read through the NLCD -> NLCD40 category mapping used to build
+#: the WPS geogrid data set. Two details of what WRF *actually* runs are folded in:
+#:
+#:   * Open water and perennial ice map onto the IGBP slots (NLCD40 17 and 15),
+#:     matching the geogrid data set, so they take those categories' values.
+#:   * Noah remaps NLCD40 categories 23 and 25 to 24 at init
+#:     (module_physics_init.F:3268), so developed open space and medium intensity
+#:     both run at developed-low's 0.70 m rather than their own 0.50 and 1.50.
+#:
+#: WRF interpolates between Z0MIN and Z0MAX by green vegetation fraction, which a
+#: static channel cannot express. The midpoint is within ~10% of the true annual
+#: mean (measured f_bar 0.41-0.48 over the WSW domain, so WRF runs slightly
+#: smoother than the midpoint), and it is exact for the 14 classes where
+#: Z0MIN == Z0MAX -- including all three forest classes, which is where the
+#: disagreement mattered most.
+#:
+#: This replaces NLCD_Z0_UL (kept below). That table rated evergreen forest at
+#: 1.125 m against WRF's 0.500 and FuXi-CFD's own WorldCover training value of
+#: 0.750 -- an outlier against both references, which put a 5.1 sigma shrub->forest
+#: contrast inside a single tile and drove visibly excessive sensitivity at
+#: forested sites. Under this table that contrast falls to 2.3 sigma.
 NLCD_Z0 = {
-    11: 0.0002,  # open water
-    12: 0.003,   # perennial ice/snow
-    21: 0.20,    # developed, open space
-    22: 0.30,    # developed, low intensity
-    23: 0.55,    # developed, medium intensity
-    24: 0.75,    # developed, high intensity
+    11: 0.0001,  # open water                  <- NLCD40 17 (IGBP water)
+    12: 0.001,   # perennial ice/snow          <- NLCD40 15 (permanent snow/ice)
+    21: 0.70,    # developed, open space       <- 23, remapped to 24 by Noah
+    22: 0.70,    # developed, low intensity    <- 24
+    23: 0.70,    # developed, medium intensity <- 25, remapped to 24 by Noah
+    24: 2.00,    # developed, high intensity   <- 26
     31: 0.01,    # barren land
-    41: 0.90,    # deciduous forest
-    42: 1.125,   # evergreen forest
-    43: 0.90,    # mixed forest
-    51: 0.05,    # dwarf scrub (AK)
-    52: 0.10,    # shrub/scrub
-    71: 0.06,    # grassland/herbaceous
-    72: 0.06,    # sedge/herbaceous (AK)
+    41: 0.50,    # deciduous forest
+    42: 0.50,    # evergreen forest
+    43: 0.35,    # mixed forest                <- midpoint of 0.20/0.50
+    51: 0.025,   # dwarf scrub (AK)            <- midpoint of 0.01/0.04
+    52: 0.03,    # shrub/scrub                 <- midpoint of 0.01/0.05
+    71: 0.11,    # grassland/herbaceous        <- midpoint of 0.10/0.12
+    72: 0.20,    # sedge/herbaceous (AK)
     73: 0.01,    # lichens
     74: 0.01,    # moss
-    81: 0.06,    # pasture/hay
-    82: 0.06,    # cultivated crops
-    90: 0.66,    # woody wetlands
-    95: 0.15,    # emergent herbaceous wetlands
+    81: 0.10,    # pasture/hay                 <- midpoint of 0.05/0.15
+    82: 0.06,    # cultivated crops            <- midpoint of 0.02/0.10
+    90: 0.40,    # woody wetlands
+    95: 0.20,    # emergent herbaceous wetlands
+}
+
+#: The previous table, from UL. Retained so the change is reversible and A/B-able
+#: -- it is a sourced external reference, not an invented set, and departing from
+#: it was a judgement call about pipeline consistency rather than a correction.
+NLCD_Z0_UL = {
+    11: 0.0002, 12: 0.003, 21: 0.20, 22: 0.30, 23: 0.55, 24: 0.75,
+    31: 0.01, 41: 0.90, 42: 1.125, 43: 0.90, 51: 0.05, 52: 0.10,
+    71: 0.06, 72: 0.06, 73: 0.01, 74: 0.01, 81: 0.06, 82: 0.06,
+    90: 0.66, 95: 0.15,
 }
 
 NLCD_CLASS_NAMES = {

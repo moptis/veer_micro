@@ -79,6 +79,14 @@ class TilingConfig(BaseModel):
     sites: list[SiteTile] = Field(default_factory=list)
     #: mode="domain": tile centre spacing. Less than 9000 m gives overlap for blending.
     stride_m: float = TILE_SPAN_M
+    #: Where the WRF grid's index-space affine map is fitted. "global" is one fit
+    #: over the whole domain and is right for anything up to ~150 km across.
+    #: "local" refits around each query point, which is what a domain large enough
+    #: for Lambert-vs-UTM curvature to matter needs: Pattern ph1 spans 180 x 153 km
+    #: and misses a global fit by 42.7 m -- past DomainGeometry's 25 m guard --
+    #: against 2.6 m locally. Switching changes the interpolation weights, so an
+    #: existing store is not comparable with one rebuilt under the other setting.
+    affine_fit: Literal["global", "local"] = "global"
     #: mode="domain": restrict to tiles whose core intersects this lon/lat box.
     #: The tile lattice is unchanged -- tiles are filtered, not re-originated --
     #: so a subset run keeps the same centres and ids as the full-domain run and
@@ -132,8 +140,12 @@ class TerrainConfig(BaseModel):
 
     #: See terrain/build.py for why these exist -- Broadview is ~4 sigma off the
     #: training distribution on both static channels.
-    dem_mode: Literal["absolute", "recentered"] = "absolute"
-    roughness_mode: Literal["absolute", "recentered"] = "absolute"
+    #: "constant" replaces the channel with the training mean everywhere, so it
+    #: normalizes to 0 and carries no signal -- an attribution diagnostic for
+    #: separating terrain-driven from roughness-driven structure, not a production
+    #: setting. See terrain/build.py.
+    dem_mode: Literal["absolute", "recentered", "constant"] = "absolute"
+    roughness_mode: Literal["absolute", "recentered", "constant"] = "absolute"
     cache_root: Path = Field(default_factory=default_cache_root)
 
 

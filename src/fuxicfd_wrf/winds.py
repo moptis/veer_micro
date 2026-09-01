@@ -91,8 +91,14 @@ class StencilInterpolator:
     convergence_deg: float
 
     def apply(self, flat: np.ndarray) -> np.ndarray:
-        """(n, 10296) or (10296,) -> (n, 9, 9) or (9, 9)."""
-        flat = np.asarray(flat, dtype=np.float64)
+        """(n, n_points) or (n_points,) -> (n, 9, 9) or (9, 9).
+
+        Pass float64 to skip the cast. In a domain sweep this is called once per
+        tile against the same domain-wide block, so a cast here is paid ~n_tiles
+        times over -- see `stencil_uv`.
+        """
+        if flat.dtype != np.float64:
+            flat = np.asarray(flat, dtype=np.float64)
         single = flat.ndim == 1
         if single:
             flat = flat[None, :]
@@ -161,8 +167,27 @@ def stencil_winds(
     interpolation, so no direction averaging ever occurs.
     """
     u, v = speeddir_to_uv(speed_flat, direction_flat)
-    u9 = interp.apply(u)
-    v9 = interp.apply(v)
+    return stencil_uv(interp, u, v, rotate=rotate)
+
+
+def stencil_uv(
+    interp: StencilInterpolator,
+    u_flat: np.ndarray,
+    v_flat: np.ndarray,
+    *,
+    rotate: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """`stencil_winds` for winds already converted to components.
+
+    Split out because speed/direction -> u,v depends only on the domain-wide
+    field, not on the tile. Calling it per tile redoes a sin/cos over every WRF
+    point once for each tile in the sweep: at 174 tiles and 26550 points that is
+    ~62x the cost of the sparse matmuls it feeds, and it is what made the first
+    Panhandle launch run at 15 tile-steps/s instead of the GPU's ~42. Convert
+    once per read block, then call this per tile.
+    """
+    u9 = interp.apply(u_flat)
+    v9 = interp.apply(v_flat)
     if rotate:
         u9, v9 = rotate_to_grid(u9, v9, interp.convergence_deg)
     return u9, v9

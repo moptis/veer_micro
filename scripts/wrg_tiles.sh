@@ -1,7 +1,7 @@
 #!/bin/bash
 # One WRG per tile, as a Slurm array -- then concatenate.
 #
-#   sbatch --array=0-237 scripts/wrg_tiles.sh <store.zarr> <outdir> [hub] [res] [bins]
+#   sbatch --array=0-237 scripts/wrg_tiles.sh <store.zarr> <outdir> [hub] [res] [bins] [rho]
 #   fuxicfd-wrf wrg-concat <outdir> --out domain.wrg
 #
 # Why per-tile rather than one domain-wide job: a 6x6 km trimmed core at 30 m is
@@ -33,11 +33,18 @@
 
 set -euo pipefail
 
-STORE="${1:?usage: sbatch scripts/wrg_tiles.sh <store.zarr> <outdir> [hub] [res] [bins]}"
+STORE="${1:?usage: sbatch scripts/wrg_tiles.sh <store.zarr> <outdir> [hub] [res] [bins] [rho]}"
 OUTDIR="${2:?missing output directory}"
 HUB="${3:-100}"
 RES="${4:-30}"
 BINS="${5:-22.5}"
+# Air density, kg/m3. Power density scales linearly with it, so a wrong value is a
+# straight systematic error in every W/m2 figure. Take it from the source's own
+# air_density_100m over the tiles being exported rather than assuming: the WSW box
+# averages 0.9828 (1.01 would overstate power density by 2.8%), and the higher
+# wsw_rough tile at 1955 m is 0.9757. The 1.01 default is kept only so existing
+# invocations behave as before.
+RHO="${6:-1.01}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fuxicfd
@@ -45,7 +52,13 @@ export PYTHONUNBUFFERED=1
 mkdir -p logs "${OUTDIR}"
 
 IDX="${SLURM_ARRAY_TASK_ID:-0}"
-TILE=$(python - "$STORE" "$IDX" <<'PY'
+# Call the env's interpreter by path, not by name. `conda activate` sets
+# CONDA_PREFIX correctly, but a uv-managed python on PATH shadows it, and a bare
+# `python` here then runs an interpreter with none of our packages -- which fails
+# as a bare ModuleNotFoundError with no hint that the wrong python was picked.
+# Console scripts like fuxicfd-wrf are immune (their shebang is absolute), which
+# is why only this inline snippet was affected.
+TILE=$("${CONDA_PREFIX:?conda env not active}/bin/python" - "$STORE" "$IDX" <<'PY'
 import sys, zarr
 root = zarr.open_group(sys.argv[1], mode="r")
 tiles = sorted(root.group_keys())
@@ -68,6 +81,6 @@ fi
 echo "host=$(hostname) tile=${TILE} (index ${IDX})"
 srun fuxicfd-wrf wrg "${STORE}" --out "${OUT}" \
     --tile "${TILE}" --hub-height "${HUB}" --resolution "${RES}" \
-    --bin-size "${BINS}" --air-density 1.01 --trim-edge 1500 \
+    --bin-size "${BINS}" --air-density "${RHO}" --trim-edge 1500 \
     --workers "${SLURM_CPUS_PER_TASK:-8}" \
     --terrain-cache /scratch/moptis/fuxicfd/cache

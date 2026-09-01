@@ -1,0 +1,64 @@
+# WSW box domain -- roughness channel switched OFF, as an attribution experiment.
+#
+# dem_mode=recentered, roughness_mode=constant: every roughness pixel is set to
+# the training mean (0.8173 m), so the channel normalizes to exactly 0 sigma and
+# carries no signal. Whatever spatial structure survives in the output came from
+# the terrain channel and the 9x9 wind stencil, not from land cover.
+#
+# Why: the model responds far more strongly to roughness than log-law physics
+# implies. Measured against the WRF-z0 rerun, halving evergreen forest z0
+# (1.125 -> 0.500, dln = -0.81) moved Weibull A by +0.181 m/s on forest pixels,
+# while nearly doubling grassland z0 (0.06 -> 0.11, dln = +0.61) moved it +0.003
+# -- ~60x more response per unit log change. That asymmetry tracks the *linear*
+# z-score normalization, not log z0. This run bounds the whole effect: it is the
+# limit of every possible roughness table.
+#
+# Geometry, source and dem_mode are identical to wsw_box_wrfz0_drec_rabs.yaml, so
+# the pair differs in exactly one input channel.
+#
+# NOT a production setting -- a zero-variance channel is itself mildly
+# off-distribution, and real roughness contrast is real physics. Read it as an
+# attribution bound, not a forward prediction.
+
+name: wsw_box_rconst_drec
+
+source:
+  kind: h5
+  path: /scratch/moptis/c2wind/wsw_nlcd/processed/wsw_nlcd.h5
+
+time:
+  start: null
+  end: null
+  stride: 1
+  limit: null
+
+tiling:
+  mode: domain
+  working_crs: auto
+  stride_m: 6000     # 3 km overlap
+  max_tiles: null
+  bbox:
+     min_lon: -105.57
+     min_lat:   34.25
+     max_lon: -105.3
+     max_lat:   34.48
+
+terrain:
+  dem_mode: recentered
+  roughness_mode: constant
+  landcover_source: nlcd
+  cache_root: /scratch/moptis/fuxicfd/cache
+
+model:
+  assets_root: /scratch/moptis/fuxicfd/assets
+  device: auto
+  batch_size: 8
+  read_block: 822
+
+output:
+  path: /scratch/moptis/fuxicfd/out/wsw_box_rconst_drec.zarr
+  dtype: float16
+  variables: [u, v]
+  levels: [80.0, 100.0, 120.0, 160.0]
+  time_chunk: 24
+  mosaic: false

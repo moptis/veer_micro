@@ -24,6 +24,15 @@ what the model saw in training.
 * ``recentered`` - keep the per-tile *anomaly* (relief, which is what actually
   drives terrain-induced flow) but shift the tile mean onto the training mean, so
   the model operates in the input range it was fitted on.
+* ``constant``   - replace the field with the training mean everywhere, so the
+  channel normalizes to exactly 0 and carries no signal at all. A diagnostic, not
+  a production setting: whatever spatial structure survives came from the *other*
+  static channel and the wind stencil, which is the only clean way to attribute
+  the output pattern between terrain and roughness. Note a zero-variance field is
+  itself mildly off-distribution -- the model was fitted on varying inputs -- so
+  read it as an attribution experiment rather than a well-posed forward run. Do
+  not use 0.0 for this: z0=0 is -4.05 sigma, further out than any real surface,
+  and a singular log-law besides.
 
 Neither is obviously right. Phase 0 decides between them empirically by comparing
 tile-mean vertical profiles against the WRF profile the site already provides.
@@ -42,7 +51,7 @@ from ..model.preprocess import normalize_static
 from . import roughness as rough_mod
 from . import nlcd, srtm, worldcover
 
-STATIC_MODES = ("absolute", "recentered")
+STATIC_MODES = ("absolute", "recentered", "constant")
 LANDCOVER_SOURCES = ("auto", "nlcd", "worldcover")
 
 
@@ -99,9 +108,11 @@ def build_terrain(
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _cache(src: str) -> Path:
-        # WorldCover keeps the original filename so existing caches stay valid.
-        return cache_dir / (f"{tile.tile_id}_raw.npz" if src == "worldcover"
-                            else f"{tile.tile_id}_raw_{src}.npz")
+        # Keyed by geo_key, not tile_id alone: ids repeat across domains and a
+        # collision serves another site's terrain with no error. See Tile.geo_key.
+        stem = f"{tile.tile_id}-{tile.geo_key}"
+        return cache_dir / (f"{stem}_raw.npz" if src == "worldcover"
+                            else f"{stem}_raw_{src}.npz")
 
     for src in (("nlcd", "worldcover") if source == "auto" else (source,)):
         path = _cache(src)
@@ -170,8 +181,12 @@ def apply_modes(
         z0 = rough_mod.despeckle(z0, size=roughness_despeckle)
     if dem_mode == "recentered":
         dem = _recenter(dem, float(np.asarray(in_stats["high_mean"])[0]))
+    elif dem_mode == "constant":
+        dem = np.full_like(dem, float(np.asarray(in_stats["high_mean"])[0]))
     if roughness_mode == "recentered":
         z0 = _recenter(z0, float(np.asarray(in_stats["high_mean"])[1]))
+    elif roughness_mode == "constant":
+        z0 = np.full_like(z0, float(np.asarray(in_stats["high_mean"])[1]))
     return dem, z0
 
 
@@ -209,7 +224,7 @@ def static_channels(
     # the values behind it changed, and would have handed back tensors built with
     # the old table when UL's values replaced them.
     key += f"-z{rough_mod.table_fingerprint(_z0_source(landcover_source))}"
-    path = cache_dir / f"{tile.tile_id}_static_{key}.npy"
+    path = cache_dir / f"{tile.tile_id}-{tile.geo_key}_static_{key}.npy"
 
     if path.exists() and not force:
         return np.load(path)

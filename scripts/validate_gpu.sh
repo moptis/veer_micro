@@ -6,14 +6,18 @@
 # Runs all six Phase 0 checks including the dem_mode arbitration, and writes a
 # JSON report. Nothing downstream should be trusted until this has been read.
 
+# Resource sizing follows scripts/submit_inference.sh: gpu-h100 nodes carry 4x
+# H100 and 128 cores, so 32 CPUs and one GPU per task lets four tasks pack onto
+# a node and the GPU count stay the limit. Measured peak RSS is single-digit GB,
+# so a 120G request buys nothing and blocks backfill -- a 120G/8h array sat at
+# 1 of 40 tasks running while 32G/4h got all 40 scheduled.
 #SBATCH --job-name=fuxicfd-val
 #SBATCH --account=clusterwakes
-#SBATCH --partition=debug-gpu
-#SBATCH --qos=normal
+#SBATCH --partition=gpu-h100
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=120G
-#SBATCH --time=01:00:00
+#SBATCH --mem=64G
+#SBATCH --time=04:00:00
 #SBATCH --output=logs/validate_%j.out
 #SBATCH --error=logs/validate_%j.err
 

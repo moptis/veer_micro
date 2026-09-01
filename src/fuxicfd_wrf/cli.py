@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .constants import TERRAIN_RES_M
+
 
 def _cmd_fetch_model(args) -> int:
     from .model import assets as assets_mod
@@ -41,14 +43,30 @@ def _cmd_inspect(args) -> int:
     print(src.time_report())
 
     lat, lon = src.coordinates()
-    geom = DomainGeometry(lat, lon)
+    # Grid shape comes from the store: it differs per domain (Broadview 78x132,
+    # WSW 96x114, Pattern ph1 150x177) and the constant is only a fallback.
+    shape = getattr(src, "domain_shape", None)
+    kw = {"crs": "auto", **({"grid_shape": shape} if shape else {})}
+    try:
+        geom = DomainGeometry(lat, lon, **kw)
+        fit_note = "(index-space bilinear is valid)"
+    except ValueError as exc:
+        if "not affine" not in str(exc):
+            raise
+        # Report rather than fail: knowing the domain needs a local fit is exactly
+        # what you ran `inspect` to find out.
+        geom = DomainGeometry(lat, lon, affine_fit="local", **kw)
+        fit_note = "-- too curved for one global fit; set tiling.affine_fit: local"
     minx, miny, maxx, maxy = geom.extent
     print("\n=== grid ===")
     print(f"shape            : {geom.grid_shape}")
     print(f"lat range        : {lat.min():.4f} .. {lat.max():.4f}")
     print(f"lon range        : {lon.min():.4f} .. {lon.max():.4f}")
     print(f"extent ({geom.crs}) : {maxx - minx:.0f} m x {maxy - miny:.0f} m")
-    print(f"affine residual  : {geom.affine_residual_m:.2f} m (index-space bilinear is valid)")
+    print(f"affine residual  : {geom.affine_residual_m:.2f} m global {fit_note}")
+    if geom.local_residual_m is not None:
+        print(f"                 : {geom.local_residual_m:.2f} m over "
+              f"{2 * geom.LOCAL_FIT_HALF + 1}-cell windows")
     tiles = geom.make_tiles()
     over = geom.make_tiles(stride_m=6000.0)
     print(f"tiles @ 9 km     : {len(tiles)}")
@@ -95,7 +113,7 @@ def _cmd_run(args) -> int:
         cfg.time.limit = args.limit
     if args.device:
         cfg.model.device = args.device
-    result = run(cfg, shard=args.shard, n_shards=args.n_shards)
+    result = run(cfg, shard=args.shard, n_shards=args.n_shards, resume=args.resume)
     print(json.dumps(result, indent=2, default=str))
     return 0
 
@@ -270,6 +288,9 @@ def main(argv=None) -> int:
     r.add_argument("--n-shards", type=int, default=1)
     r.add_argument("--limit", type=int, default=None, help="cap number of timesteps")
     r.add_argument("--device", choices=["auto", "cpu", "cuda"], default=None)
+    r.add_argument("--resume", action="store_true",
+                   help="skip blocks this shard already wrote (needs the same "
+                        "--n-shards as the original launch)")
     r.set_defaults(func=_cmd_run)
 
     v = sub.add_parser("validate", help="Phase 0 validation report")
@@ -287,8 +308,10 @@ def main(argv=None) -> int:
     w.add_argument("--out", type=Path, required=True)
     w.add_argument("--hub-height", type=float, default=100.0,
                    help="target hub height (m); snaps to the nearest model level")
-    w.add_argument("--resolution", type=float, default=100.0,
-                   help="WRG grid spacing in m (default 100)")
+    w.add_argument("--resolution", type=float, default=TERRAIN_RES_M,
+                   help=f"WRG grid spacing in m (default {TERRAIN_RES_M:g}, the "
+                        "model's native output resolution). Coarser values "
+                        "average model pixels away: 100 m keeps 1 point per 11.")
     w.add_argument("--bin-size", type=float, default=30.0, help="sector width, deg")
     w.add_argument("--buffer", type=float, default=0.0,
                    help="fraction trimmed from each edge (reference default was 0.2)")

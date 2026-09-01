@@ -33,7 +33,9 @@ from .sources.base import WrfSource
 from .sources.h5_source import H5WrfSource
 from .sources.npz_source import NpzWrfSource
 from .terrain.build import static_channels
-from .winds import StencilInterpolator, build_stencil_interpolator, stencil_winds
+from .winds import (
+    StencilInterpolator, build_stencil_interpolator, speeddir_to_uv, stencil_uv,
+)
 from .levels import LevelSelection
 from .writers import MosaicStore, TileStore, resolve_levels, shard_bounds
 
@@ -217,6 +219,7 @@ def prepare(cfg: RunConfig, *, build_static: bool = True) -> Prepared:
     geom = DomainGeometry(
         lat, lon,
         crs=cfg.tiling.working_crs,
+        affine_fit=cfg.tiling.affine_fit,
         **({"grid_shape": shape} if shape else {}),
     )
     tiles = build_tiles(cfg, geom)
@@ -279,11 +282,18 @@ def run(
     shard: int = 0,
     n_shards: int = 1,
     progress_every: int = 1,
+    resume: bool = False,
 ) -> dict:
     """Execute one shard of the run.
 
     Shards split the time axis on Zarr chunk boundaries, so array tasks can write
     to the same store concurrently without locking.
+
+    `resume` skips the leading blocks this shard has already written, so a task
+    killed by the wall clock picks up instead of starting over. Shard boundaries
+    must match the original launch for this to mean anything -- they are derived
+    from `n_shards`, so a resume with a different shard count silently resumes
+    against someone else's time range.
     """
     prep = prepare(cfg)
     prep.store.create(config_json=cfg.model_dump_json())
@@ -298,6 +308,25 @@ def run(
         f"{len(prep.times)}, {len(prep.tiles)} tiles",
         flush=True,
     )
+
+    if resume and not cfg.output.mosaic:
+        resume_at = prep.store.completed_prefix(t_start, t_stop)
+        if resume_at > t_start:
+            print(
+                f"[run] resuming: times [{t_start}, {resume_at}) already written "
+                f"for all {len(prep.tiles)} tiles "
+                f"({100 * (resume_at - t_start) / max(t_stop - t_start, 1):.0f}% of "
+                f"this shard); skipping ahead",
+                flush=True,
+            )
+            t_start = resume_at
+        if t_start >= t_stop:
+            print("[run] shard already complete, nothing to do", flush=True)
+            return {"shard": shard, "n_written": 0, "n_tiles": len(prep.tiles),
+                    "elapsed_s": 0.0, "store": str(cfg.output.path), "resumed": True}
+    elif resume:
+        print("[run] --resume ignored: mosaic output has no per-tile chunks to test",
+              flush=True)
 
     session = FuxiCFDSession(
         assets_mod.resolve(cfg.model.assets_root).onnx, device=cfg.model.device
@@ -322,25 +351,31 @@ def run(
     # amortises that back down.
     read_block = max(cfg.model.read_block, cfg.output.time_chunk)
     read_block -= read_block % cfg.output.time_chunk      # keep chunk alignment
-    cache_start, cache_speed, cache_dir = -1, None, None
+    # Convert to components ONCE per read block, not once per tile. The
+    # conversion is domain-wide and tile-independent, so doing it inside the tile
+    # loop repeats a sin/cos over every WRF point for every tile: on the 174-tile
+    # Panhandle sweep that alone was ~62x the cost of the matmuls it feeds and
+    # held the first launch to 15 tile-steps/s. Cached as float64 so the per-tile
+    # matmul needs no cast either.
+    cache_start, cache_u, cache_v = -1, None, None
 
     for b_start in range(t_start, t_stop, cfg.output.time_chunk):
         b_stop = min(b_start + cfg.output.time_chunk, t_stop)
 
-        if cache_speed is None or b_start >= cache_start + read_block or b_start < cache_start:
+        if cache_u is None or b_start >= cache_start + read_block or b_start < cache_start:
             cache_start = b_start
             cache_stop = min(b_start + read_block, t_stop)
-            cache_speed, cache_dir = prep.source.read_wind_100m(
-                prep.rows[cache_start:cache_stop]
+            cache_u, cache_v = speeddir_to_uv(
+                *prep.source.read_wind_100m(prep.rows[cache_start:cache_stop])
             )
         lo = b_start - cache_start
-        speed = cache_speed[lo : lo + (b_stop - b_start)]
-        direction = cache_dir[lo : lo + (b_stop - b_start)]
+        u_flat = cache_u[lo : lo + (b_stop - b_start)]
+        v_flat = cache_v[lo : lo + (b_stop - b_start)]
 
         per_tile = {}
         for tile in prep.tiles:
             interp = prep.interpolators[tile.tile_id]
-            u9, v9 = stencil_winds(interp, speed, direction)
+            u9, v9 = stencil_uv(interp, u_flat, v_flat)
             winds = preprocess.normalize_winds(u9, v9, prep.in_stats)
             x = preprocess.assemble(winds, prep.statics[tile.tile_id])
 
@@ -415,7 +450,9 @@ def plan(cfg: RunConfig) -> dict:
         "dtype": cfg.output.dtype,
         "mb_per_tile_timestep": per_tile_step / 1e6,
         "total_gb": total / 1e9,
+        "affine_fit": prep.geom.affine_fit,
         "affine_residual_m": prep.geom.affine_residual_m,
+        "local_affine_residual_m": prep.geom.local_residual_m,
         "tile_ids": [t.tile_id for t in prep.tiles[:10]],
         "mosaic": cfg.output.mosaic,
         "mosaic_shape": ([prep.store.ny, prep.store.nx] if cfg.output.mosaic else None),

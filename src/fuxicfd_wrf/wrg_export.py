@@ -325,7 +325,17 @@ def _elevation_on_grid(grid: WrgGrid, tiles: list[Tile], terrain_cache) -> np.nd
     acc = np.zeros((ny, nx), dtype=np.float64)
     wsum = np.zeros((ny, nx), dtype=np.float64)
     for tile in tiles:
-        if not (cache / "tiles" / f"{tile.tile_id}_raw.npz").exists():
+        # build_terrain keys the raw cache by land-cover source: `{id}_raw.npz`
+        # only for WorldCover, `{id}_raw_{source}.npz` for anything else. Testing
+        # only for the WorldCover name meant every run with `landcover_source:
+        # nlcd` missed here and fell through to a zero elevation column -- the
+        # WRG still wrote, so it failed quietly. The DEM is identical whichever
+        # land-cover raster was fetched, so any of these files serves.
+        tile_cache = cache / "tiles"
+        if not (
+            (tile_cache / f"{tile.tile_id}_raw.npz").exists()
+            or any(tile_cache.glob(f"{tile.tile_id}_raw_*.npz"))
+        ):
             continue
         dem = build_terrain(tile, cache).dem.astype(np.float32)
         smp = _make_sampler(grid, *tile.terrain_axes(), overlap_px=0)
