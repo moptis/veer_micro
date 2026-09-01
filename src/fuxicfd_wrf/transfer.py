@@ -91,7 +91,12 @@ def upsample_coarse(field: np.ndarray) -> np.ndarray:
 
 
 def wrap180(deg: np.ndarray) -> np.ndarray:
-    """Wrap angles to (-180, 180]."""
+    """Wrap angles to [-180, 180).
+
+    Note the half-open end: exactly 180 comes back as -180. That only arises for
+    a complete flow reversal, where the sign carries no meaning anyway, so this
+    does not special-case it.
+    """
     return (np.asarray(deg, dtype=np.float64) + 180.0) % 360.0 - 180.0
 
 

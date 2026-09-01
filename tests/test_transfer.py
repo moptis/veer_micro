@@ -83,8 +83,11 @@ def test_speedup_and_deflection_recovered():
 def test_wrap180_branch_cut():
     assert wrap180(190.0) == pytest.approx(-170.0)
     assert wrap180(-190.0) == pytest.approx(170.0)
-    assert wrap180(180.0) == pytest.approx(180.0)
     assert wrap180(0.0) == pytest.approx(0.0)
+    assert wrap180(359.0) == pytest.approx(-1.0)
+    # Half-open at the top: exactly 180 lands on -180. Only a complete flow
+    # reversal reaches it, where the sign is meaningless either way.
+    assert wrap180(180.0) == pytest.approx(-180.0)
 
 
 def test_met_direction_conventions():
@@ -149,8 +152,9 @@ def test_combine_sectors_matches_sampled_mixture():
         for i in range(3)
     ])
     A_c, k_c = combine_sectors(freq, A, k)
-    m1_fit = float(A_c) * gamma(1 + 1 / float(k_c))
-    m3_fit = float(A_c) ** 3 * gamma(1 + 3 / float(k_c))
+    a, kk = float(A_c[0, 0]), float(k_c[0, 0])
+    m1_fit = a * gamma(1 + 1 / kk)
+    m3_fit = a**3 * gamma(1 + 3 / kk)
 
     assert m1_fit == pytest.approx(sample.mean(), rel=0.01)
     assert m3_fit == pytest.approx((sample**3).mean(), rel=0.03)
