@@ -441,3 +441,4 @@ cores; otherwise onnxruntime floods stderr with `pthread_setaffinity_np` failure
 
 Code: see `LICENSE`. **The FuXi-CFD model weights and dataset are CC BY-NC 4.0 —
 non-commercial use only.** They are downloaded at runtime, never vendored.
+# fuxi-cfd-wrf
