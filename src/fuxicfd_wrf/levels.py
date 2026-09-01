@@ -1,9 +1,13 @@
 """Vertical level selection and interpolation.
 
-FuXi-CFD emits 27 fixed heights (10 m to 300.795 m). None of them is a round
-number above 50 m -- the stack goes 75.5255, 83.57805, 92.435855, 102.17944,
-112.897385, 124.687123, 137.655835, 151.921419, 167.613561 -- so any deliverable
-at 80/100/120/160 m has to be interpolated.
+FuXi-CFD emits 27 fixed heights (5 m to 214.29 m): a uniform 5 m ladder from 5 to
+100 m, then 106.5, 114.95, 125.94, 140.22, 158.78, 182.91, 214.29. So 80 m and
+100 m land on exact levels, while 120 m and 160 m are interpolated.
+
+See `constants.OUTPUT_HEIGHTS` before touching any of this. Those are the paper's
+Supplementary Note 1.1 values, NOT a slice of the shipped `height.npy` -- that
+asset is the solver's 56-level grid, and reading output heights off it is wrong
+by up to 86 m.
 
 Selection and interpolation are handled by one object: a (n_target, n_source)
 weight matrix. Exact hits get a one-hot row, interpolated heights get a two-point
@@ -13,12 +17,11 @@ interpolate?" question out of every call site.
 Interpolation is linear in log(z)
 ---------------------------------
 Wind speed near the surface follows a log profile, so log(z) is the physically
-motivated abscissa. In practice it barely matters here: model levels are 8-11%
-apart, and interpolating to 80 m gives a weight of 0.567 in log-z versus 0.556
-linear -- about 0.002 m/s on a typical 0.15 m/s inter-level difference. The choice
-is defensible rather than consequential, so it is not worth agonising over.
+motivated abscissa. It barely matters through the dense lower stack, where levels
+are 5 m apart; it is worth having above 140 m, where they widen to 15-17% and a
+linear weight starts to visibly under-read the profile's curvature.
 
-Extrapolation is refused. A request below 10 m or above 300.795 m raises rather
+Extrapolation is refused. A request below 5 m or above 214.29 m raises rather
 than silently clamping to the end of the stack.
 """
 

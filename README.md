@@ -31,11 +31,22 @@ code is authoritative — it produced the shipped predictions. What it requires:
 Both grids describe the same 9 km × 9 km box. Output is `(1, 27, 4, 300, 300)` —
 note the axis order is **(level, variable, y, x)**, not (variable, level, y, x).
 
-**Output heights are `height.npy[2:29]`: 10 m → 300.795 m over 27 levels.** That
-slice appears nowhere in prose; it comes from upstream's `check.ipynb`. The paper's
-claim of "27 levels extending to 214 m" contradicts the shipped code and is wrong.
-`constants.validate_heights_against_asset` re-derives this from the asset so the
-hard-coded copy cannot drift silently.
+**Output heights run 5 m → 214.29 m over 27 levels** — a uniform 5 m ladder from
+5 to 100 m, then 106.5, 114.95, 125.94, 140.22, 158.78, 182.91, 214.29. Source of
+truth is the paper's Supplementary Note 1.1, corroborated by the dataset README
+for `outputs.npz`.
+
+**Do not derive them from `utils/height.npy`.** That asset is the CFD solver's
+full 56-level grid reaching 4 km, not the 27 saved output levels. An earlier
+version of this file used `height.npy[2:29]`, giving 10 → 300.795 m — wrong by up
+to 86 m, labelling the true 100 m level as 151.9 m. That came from upstream's
+`inference_example/scripts/check.ipynb`, which slices it that way and looks up
+45.0 m, a value that sits at a different index under each grid, so the shipped
+example silently plots the wrong level and nothing in it reveals the error.
+`constants.validate_heights` guards against the regression.
+
+Two hub heights land on exact model levels and need no interpolation: **80 m**
+(index 15) and **100 m** (index 19).
 
 The model card says terrain is `(300, 300)`. It is `(301, 301)` — preprocessing
 zooms 301→300.
@@ -314,6 +325,106 @@ a deliverable, and nothing downstream reports it. A bbox that reaches outside th
 domain fails at setup with the reachable lon/lat range in the error, rather than
 silently returning fewer tiles.
 
+## Sector transfer: coarse WRG in, fine WRG out
+
+```bash
+fuxicfd-wrf wrg-inspect  /path/to/coarse_100m.wrg --crs EPSG:32613
+fuxicfd-wrf wrg-downscale configs/broadview_downscale.yaml
+```
+
+**FuXi-CFD is a steady-state RANS emulator.** Every training label is a converged
+solution for one (terrain, inflow) pair, and nothing in the network carries a time
+dimension — its 9×9 coarse input was a 1 km coarsening of those same mean fields.
+Driving it with instantaneous WRF snapshots hands a mean-field operator a
+turbulent realisation. A sector-conditional mean drawn from a WRG is much closer
+to what it was trained on, and there are 12 of them instead of 52,560 timesteps.
+
+So the axis being swept is not intrinsically time; it is a list of independent
+**inflow states**. `sources/base.py` calls that seam `CoarseSource`. `WrfSource`
+supplies one state per timestep, `WrgSectorSource` one per sector.
+
+| | timestep path | sector path |
+|---|---|---|
+| inferences (57 tiles) | 3.0 M (hourly) | **684** |
+| GPU time | ~8 H100-hours | **~16 s** |
+| intermediate storage | 6.2 TB | **none** |
+
+None of the sharding, resume, chunk-alignment, float16 or Zarr machinery applies:
+`wrg_downscale.run` is one pass with no store in the middle.
+
+### What the transfer is
+
+Per sector, the model output is reduced to two fields on the tile's 300×300 grid:
+
+```
+S      = |U_fine| / |U_coarse_upsampled|          speedup
+dtheta = theta_fine - theta_coarse_upsampled      deflection
+```
+
+The denominator is the 9×9 stencil zoomed to 300×300 — **not** the parent cell's
+value. That is literally what the model ingested (preprocessing normalises then
+zooms; both are affine, so zooming the raw winds recovers the de-normalised field
+the network saw). Against the parent cell, S would absorb the coarse-scale
+gradient across the tile, so it would carry structure the mesoscale model already
+resolved and applying it would double-count.
+`tests/test_transfer.py::test_upsample_matches_preprocessing` pins this.
+
+Applying it is deliberately *not* `A_fine = A_coarse × S`:
+
+```
+k_fine = k_coarse                        carried over
+A_fine = U_fine / Gamma(1 + 1/k_fine)    exact, no reliance on S
+```
+
+`zoom(A·Γ(1+1/k))` is not `Γ(1+1/k)·zoom(A)` unless k is constant across the tile,
+so recovering A from the model's own speed avoids an error wherever k varies. S is
+still computed and saved, because it is what the timestep-vs-sector comparison
+tests — but it is a diagnostic here, not the mechanism.
+
+### Two assumptions, both measurable
+
+**k is carried over unchanged.** Terrain reshapes the speed distribution as well
+as scaling it, and a neutral RANS emulator driven at one speed per sector cannot
+report that. If `speed_bins: 3` shows S varying with inflow magnitude, that
+dependence *is* the k adjustment, and it belongs in `transfer.apply_transfer`.
+The run writes a `.diagnostics.json` with the spread of S across bins; below
+~0.02 relative, one inference per sector suffices.
+
+**Direction is uniform across each tile.** A WRG records a frequency per sector,
+never a mean direction *within* one, so every coarse cell in a state gets the
+sector centre while the speed field varies cell to cell. Over 9 km the directional
+spread of a mesoscale field is small, but this is exactly what the
+timestep-vs-sector speedup comparison is there to test.
+
+Deflection is applied as a nearest-bin reassignment of sector frequency, with
+sectors that collect flow from more than one source recombined by moment
+matching. At 30° bins that is a coarse instrument — under half a bin moves
+nothing, over half a bin moves everything — and it is the honest limit of what a
+sector-binned representation can express. `deflect: false` isolates the speedup.
+
+### Power density convention
+
+This path is analytic throughout: the mixture's third moment is
+`sum_s f_s A_s³ Γ(1+3/k_s)`, and the all-sector Weibull is fitted to match the
+first and third moments, so `0.5ρA³Γ(1+3/k)` reproduces it by construction. That
+matches `wrg_read.weibull_power_density` and **differs from `wrg.power_density`**,
+which accumulates the third moment from a streamed time series. The two agree on
+well-fitted data and diverge where the Weibull fit is poor — so a timestep-derived
+WRG and a sector-derived WRG must be compared on one convention. Use this one.
+
+### Validating the shortcut without masts
+
+The timestep path is the ground truth for the sector path, and it needs no
+observations. From an existing Zarr store, compute per-timestep
+`S = |U_fine| / |U_coarse|`, bin by sector and average; then compare against
+`<out>.transfer.npz` from a `wrg-downscale` run with `deflect: false`. Agreement
+settles the shortcut internally. Divergence measures the input-distribution
+mismatch directly — sector-mean 9×9 fields have far less spatial variance than
+instantaneous ones, and the input scaler was fitted on the latter.
+
+This is why the timestep path should not be removed until that comparison has
+run.
+
 ## WRG export
 
 ```bash
@@ -360,10 +471,10 @@ Two things to set deliberately:
 
 ## Vertical interpolation
 
-FuXi-CFD's 27 levels contain **no round numbers above 50 m** — the stack runs
-75.5255, 83.57805, 92.435855, 102.17944, 112.897385, 124.687123, 137.655835,
-151.921419, 167.613561 m. Every turbine-relevant deliverable height is therefore
-interpolated, and `output.levels` accepts arbitrary heights:
+FuXi-CFD's levels are a uniform 5 m ladder to 100 m, then widen: 106.5, 114.95,
+125.94, 140.22, 158.78, 182.91, 214.29 m. So **80 m and 100 m are exact levels**,
+while anything above 100 m is interpolated. `output.levels` accepts arbitrary
+heights:
 
 ```yaml
 output:
@@ -371,20 +482,20 @@ output:
 ```
 
 ```
-80 m  (interp 75.525/83.578 m, w=0.568)
-100 m (interp  92.436/102.179 m, w=0.785)
-120 m (interp 112.897/124.687 m, w=0.614)
-160 m (interp 151.921/167.614 m, w=0.527)
+80 m  (exact)
+100 m (exact)
+120 m (interp 114.95/125.94 m, w=0.463)
+160 m (interp 158.78/182.91 m, w=0.086)
 ```
 
 The run log prints exactly that. Interpolation is linear in log(z) — physically
-motivated for a wind profile, though barely consequential here: levels are 8–11%
-apart, so log versus linear differs by ~1% of the interval. Extrapolation beyond
-10 m or 300.795 m raises rather than clamping.
+motivated for a wind profile, though barely consequential in the dense lower
+stack. It matters more above 140 m, where the levels are 15–17% apart.
+Extrapolation beyond 5 m or 214.29 m raises rather than clamping.
 
-The distinction that matters: an interpolated 80 m field is **labelled 80 m**,
-which is honest. *Snapping* to 83.578 m and calling it 80 m would not be, and the
-code refuses to do that anywhere.
+The distinction that matters: an interpolated 120 m field is **labelled 120 m**,
+which is honest. *Snapping* to 125.94 m and calling it 120 m would not be, and
+the code refuses to do that anywhere.
 
 `fuxicfd-wrf wrg --hub-height 80` interpolates within whatever levels the store
 holds, by the same machinery.

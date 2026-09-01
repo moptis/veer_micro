@@ -1,0 +1,58 @@
+# Sector-transfer downscaling: coarse 1 km WRG -> fine WRG.
+#
+# One inference per sector per tile instead of one per timestep. For the 57-tile
+# Broadview domain at 12 sectors that is 684 inferences -- seconds on an H100,
+# against ~20 H100-hours and 58 TB for the equivalent timestep sweep.
+#
+#   fuxicfd-wrf wrg-inspect <coarse.wrg> --crs EPSG:32613
+#   fuxicfd-wrf wrg-downscale configs/broadview_downscale.yaml
+
+name: broadview_downscale
+
+source:
+  # The 100 m coarse deliverable, NOT 80/120/160 m: the model's wind channels
+  # are 100 m, and driving it with another height feeds it a field it was never
+  # trained to accept. `wrg-inspect` warns if the hub height disagrees.
+  path: /scratch/moptis/c2wind/broadview/control/deliverables/wrg/broadview/broadview_100m.wrg
+  # A .wrg records no projection. This must be the CRS the coarse file was
+  # written in -- get it wrong and the geometry silently lands in the wrong place.
+  crs: EPSG:32613
+  # 1 drives each sector at its mean speed. Set 3 for one run to measure whether
+  # the speedup is speed-invariant; see the diagnostics report.
+  speed_bins: 1
+
+tiling:
+  mode: domain
+  # 3 km of overlap, so the cosine taper has something to blend with. FuXi-CFD
+  # sees only its own 9 km window, with none of the 1.5 km buffer its training
+  # CFD had, so tile edges are its least reliable region.
+  stride_m: 6000
+  # "auto" lays tiles out in the coarse WRG's own CRS, which makes the affine
+  # fit exact -- a WRG is already a regular projected lattice.
+  working_crs: auto
+  affine_fit: global
+
+terrain:
+  landcover_source: nlcd
+  cache_root: /scratch/moptis/fuxicfd/cache
+  # Broadview sits ~4 sigma off the training distribution on both static
+  # channels. `recentered` preserves per-tile relief but shifts the tile mean
+  # onto the training mean. Re-run the mode comparison when the site changes --
+  # the Phase 0 result is not guaranteed to transfer.
+  dem_mode: recentered
+  roughness_mode: absolute
+
+model:
+  device: auto
+  batch_size: 8
+
+output:
+  path: /scratch/moptis/fuxicfd/out/wrg/broadview_downscaled_100m.wrg
+  # The model's native lattice is 30.1003 m; anything finer only interpolates.
+  resolution_m: 100.0
+  hub_height: 100.0
+  # Broadview is at ~1340 m where rho ~ 1.06. The 1.225 default overstates power
+  # density by ~13%.
+  air_density: 1.06
+  deflect: true
+  save_transfer: true
