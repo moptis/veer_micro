@@ -126,7 +126,14 @@ def run(cfg: DownscaleConfig) -> DownscaleResult:
     )
 
     levels = LevelSelection.build(OUTPUT_HEIGHTS, [cfg.output.hub_height])
-    print(f"[downscale] target height: {levels.describe()}")
+    # The contiguous source-level range the weights touch: 1 level for an exact
+    # hit, 2 for an interpolated height. Everything else is computed by the model
+    # and thrown away, so it is never de-normalised.
+    lo, hi = levels.support
+    print(
+        f"[downscale] target height: {levels.describe()} "
+        f"(model levels [{lo}, {hi}) of {len(OUTPUT_HEIGHTS)})"
+    )
 
     A = assets_mod.resolve(cfg.model.assets_root)
     in_stats, out_stats = A.load_input_scaler(), A.load_output_scaler()
@@ -167,16 +174,25 @@ def run(cfg: DownscaleConfig) -> DownscaleResult:
         u9, v9 = stencil_uv(interp, u_flat, v_flat)
         x = preprocess.assemble(preprocess.normalize_winds(u9, v9, in_stats), static)
 
-        outs = []
+        # Reduce to (u, v) at the target height *inside* the batch loop.
+        #
+        # The model's head emits all 27 levels and all 4 variables whether or not
+        # they are wanted, so the temptation is to concatenate the batches and
+        # pick afterwards. Doing that holds 27 levels x 4 variables x every state
+        # in float64 -- ~2.5 GB for the concatenate plus ~1.2 GB for the copies
+        # `split` makes -- to keep 2 of 108 planes. Slicing to the levels the
+        # selection actually touches before de-normalising, and taking u and v
+        # per batch, drops the peak by roughly 50x with identical output.
+        u_parts, v_parts = [], []
         for i in range(0, x.shape[0], batch):
-            outs.append(
-                postprocess.denormalize(session.run(x[i : i + batch]), out_stats)
+            blk = postprocess.denormalize_levels(
+                session.run(x[i : i + batch]), out_stats, lo, hi
             )
-        fields = postprocess.split(np.concatenate(outs, axis=0))
-
-        # (n_state, 1, 300, 300) -> (n_state, 300, 300) at the target height.
-        u_fine = levels.apply(fields["u"])[:, 0]
-        v_fine = levels.apply(fields["v"])[:, 0]
+            f = postprocess.split(blk)
+            u_parts.append(levels.apply_sliced(f["u"], lo, hi, level_axis=1)[:, 0])
+            v_parts.append(levels.apply_sliced(f["v"], lo, hi, level_axis=1)[:, 0])
+        u_fine = np.concatenate(u_parts, axis=0)
+        v_fine = np.concatenate(v_parts, axis=0)
         tr = sector_transfer(u_fine, v_fine, u9, v9)
 
         smp = _make_sampler(grid, *tile.model_axes(), overlap_px=overlap_px)

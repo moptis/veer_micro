@@ -41,6 +41,39 @@ def denormalize(pred: np.ndarray, out_stats: dict) -> np.ndarray:
     raise ValueError(f"expected 4-D or 5-D prediction, got shape {pred.shape}")
 
 
+def denormalize_levels(
+    pred: np.ndarray, out_stats: dict, lo: int, hi: int
+) -> np.ndarray:
+    """De-normalize only source levels ``[lo, hi)``.
+
+    Identical to ``denormalize(pred, out_stats)[..., lo:hi, :, :, :]`` but without
+    ever materialising the other 25-odd levels in float64.
+
+    That matters because the model's head emits all 27 levels unconditionally
+    while a WRG needs one, and de-normalising promotes float32 to float64: a
+    batch of 8 is 311 MB raw and 622 MB de-normalised, against 23 MB for the two
+    levels an interpolated hub height actually touches. Pair it with
+    ``LevelSelection.support``, which reports exactly that range.
+    """
+    pred = np.asarray(pred)
+    mean = np.asarray(out_stats["mean"])
+    std = np.asarray(out_stats["std"])
+    if mean.shape != (N_LEVELS, len(OUTPUT_VARS)):
+        raise ValueError(
+            f"output scaler mean is {mean.shape}, expected "
+            f"({N_LEVELS}, {len(OUTPUT_VARS)})"
+        )
+    if not 0 <= lo < hi <= N_LEVELS:
+        raise ValueError(f"level slice [{lo}, {hi}) is outside [0, {N_LEVELS})")
+
+    m, s = mean[lo:hi], std[lo:hi]
+    if pred.ndim == 4:
+        return pred[lo:hi] * s[:, :, None, None] + m[:, :, None, None]
+    if pred.ndim == 5:
+        return pred[:, lo:hi] * s[None, :, :, None, None] + m[None, :, :, None, None]
+    raise ValueError(f"expected 4-D or 5-D prediction, got shape {pred.shape}")
+
+
 def split(pred: np.ndarray) -> dict[str, np.ndarray]:
     """Split the variable axis into a dict of named fields.
 

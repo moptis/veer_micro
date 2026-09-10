@@ -44,7 +44,15 @@ terrain:
 
 model:
   device: auto
-  batch_size: 8
+  # Peak RSS is roughly linear in batch size and it is onnxruntime's arena, not
+  # anything this repo allocates: measured 3.1 GB at batch 1 against ~15-18 GB at
+  # batch 8, which OOM-killed a 31 GB WSL box three times. The model emits all
+  # 27 levels x 4 variables per sample whether or not they are wanted, so a batch
+  # of 8 is 311 MB of output alone before any transformer activations.
+  #
+  # Throughput has already plateaued by batch 4 on a GPU (see README), so on CPU
+  # this costs little. Raise it on Kestrel, where the H100 nodes have the memory.
+  batch_size: 2
 
 output:
   path: /home/optism/fuxicfd/out/wsw_south_downscaled_100m.wrg
