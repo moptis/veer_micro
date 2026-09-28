@@ -144,8 +144,8 @@ class TerrainConfig(BaseModel):
     #: normalizes to 0 and carries no signal -- an attribution diagnostic for
     #: separating terrain-driven from roughness-driven structure, not a production
     #: setting. See terrain/build.py.
-    dem_mode: Literal["absolute", "recentered", "constant"] = "absolute"
-    roughness_mode: Literal["absolute", "recentered", "constant"] = "absolute"
+    dem_mode: Literal["absolute", "recentered", "constant", "coarse"] = "absolute"
+    roughness_mode: Literal["absolute", "recentered", "constant", "coarse"] = "absolute"
     cache_root: Path = Field(default_factory=default_cache_root)
 
 

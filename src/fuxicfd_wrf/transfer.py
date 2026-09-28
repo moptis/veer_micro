@@ -56,6 +56,7 @@ be compared on one convention -- use this one.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 from scipy.ndimage import zoom
@@ -175,8 +176,31 @@ def _shape_ratio(k: np.ndarray) -> np.ndarray:
     return gamma(1.0 + 3.0 / k) / gamma(1.0 + 1.0 / k) ** 3
 
 
+#: Table resolution for the inverse of `_shape_ratio`. 2^20 points log-spaced
+#: over `K_BOUNDS` puts adjacent k within 4.4e-6 relative of each other, and
+#: linear interpolation between them is second-order, so the inversion error
+#: lands ~1e-11 -- far below the 2 decimals k is written to in a .wrg, and below
+#: the bisection's own convergence on any realistic array.
+_K_TABLE_N = 1 << 20
+
+
+@lru_cache(maxsize=1)
+def _ratio_inverse_table() -> tuple[np.ndarray, np.ndarray]:
+    """Ascending (ratio, k) pair for inverting `_shape_ratio` by interpolation.
+
+    `_shape_ratio` is strictly *decreasing* in k, so the table is reversed to
+    give `np.interp` the ascending abscissa it requires. Built once per process;
+    the cost is ~1e6 gamma evaluations against the tens of millions the caller
+    would otherwise repeat sixty times over.
+    """
+    k = np.geomspace(K_BOUNDS[0], K_BOUNDS[1], _K_TABLE_N)
+    with np.errstate(over="ignore", invalid="ignore"):
+        r = _shape_ratio(k)
+    return r[::-1].copy(), k[::-1].copy()
+
+
 def fit_weibull_moments(
-    m1: np.ndarray, m3: np.ndarray, *, iters: int = 60
+    m1: np.ndarray, m3: np.ndarray, *, iters: int | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Weibull (A, k) matching a given first and third moment.
 
@@ -185,10 +209,20 @@ def fit_weibull_moments(
     deflected out of more than one source sector.
 
     ``E[U^3]/E[U]^3 = Gamma(1+3/k)/Gamma(1+1/k)^3`` is strictly decreasing in k,
-    so this bisects on k over `K_BOUNDS` (vectorised, ~60 iterations to machine
-    precision on the interval) rather than calling a scalar root finder per grid
-    point. Points whose ratio falls outside the range reachable on `K_BOUNDS` are
-    clipped to the bound, which is the same convention the streaming MLE uses.
+    so inverting it is a 1-D root find. It is done by interpolating a precomputed
+    table rather than by bisection, because the function being inverted depends
+    on *k alone*: a vectorised bisection re-evaluates the identical 1-D curve at
+    every grid point on every iteration. Measured on one sww-sized array
+    (16 x 1500 x 1301), 60 iterations cost 92 s of a 106 s ``apply_transfer`` --
+    the single largest cost in the whole downscale run, larger than the ASCII
+    write and the GPU combined. Tabulating the inverse once makes it ~2 s.
+
+    Points whose ratio falls outside the range reachable on `K_BOUNDS` clip to
+    the bound -- ``np.interp`` does that at the table ends by construction, which
+    is the same convention the streaming MLE uses.
+
+    ``iters`` is accepted and ignored; it named the old bisection's iteration
+    count and is kept so existing callers do not break.
     """
     m1 = np.asarray(m1, dtype=np.float64)
     m3 = np.asarray(m3, dtype=np.float64)
@@ -197,17 +231,8 @@ def fit_weibull_moments(
     ratio = np.full(m1.shape, np.nan)
     np.divide(m3, m1**3, out=ratio, where=ok)
 
-    lo = np.full(m1.shape, K_BOUNDS[0], dtype=np.float64)
-    hi = np.full(m1.shape, K_BOUNDS[1], dtype=np.float64)
-    # Decreasing in k: ratio above r(lo) clips to lo, below r(hi) clips to hi.
-    for _ in range(iters):
-        mid = 0.5 * (lo + hi)
-        with np.errstate(over="ignore", invalid="ignore"):
-            too_peaked = _shape_ratio(mid) > ratio
-        # ratio < r(mid) means the true k is above mid.
-        lo = np.where(too_peaked, mid, lo)
-        hi = np.where(too_peaked, hi, mid)
-    k = 0.5 * (lo + hi)
+    r_asc, k_desc = _ratio_inverse_table()
+    k = np.interp(ratio, r_asc, k_desc)
 
     A = np.full(m1.shape, np.nan)
     np.divide(m1, gamma(1.0 + 1.0 / k), out=A, where=ok)
@@ -314,14 +339,31 @@ def apply_transfer(
     acc_f = np.zeros_like(w)
     acc_m1 = np.zeros_like(w)
     acc_m3 = np.zeros_like(w)
-    idx = np.arange(n_sec)
+
+    # Scatter each source sector's weight into whichever target sector it was
+    # deflected to. One source sector can land anywhere, so this is a scatter
+    # rather than a reshuffle -- but for a *fixed* source sector every point has
+    # exactly one target, so the flat indices `target[s]*npix + point` are unique
+    # and plain fancy-index `+=` is correct. No np.add.at (slow) and no dense
+    # one-hot.
+    #
+    # This is a memory change, not a speed one: it avoids building an
+    # (n_sec, ny, nx) bool mask and three full-size float64 temporaries on each
+    # of n_sec iterations -- ~12 GB of allocation churn per sww-sized cell, and
+    # 2.6x that on ph1 -- but measured runtime is unchanged (110.8 s vs 106.2 s,
+    # bitwise-identical output). The time in this function was never the one-hot;
+    # it was `fit_weibull_moments` below. Left in place for the smaller footprint
+    # on the larger domains, where the old version crowded a 64 GB node.
+    npix = w[0].size
+    pix = np.arange(npix)
+    # Views onto the accumulators, so the scatter writes straight through.
+    flat_f, flat_m1, flat_m3 = acc_f.reshape(-1), acc_m1.reshape(-1), acc_m3.reshape(-1)
     for s in range(n_sec):
-        # np.add.at over the target axis: one source sector can land anywhere.
-        sel = target[s]                              # (ny, nx) target index
-        onehot = (sel[None, ...] == idx[:, None, None])
-        acc_f += onehot * w[s]
-        acc_m1 += onehot * (w[s] * np.nan_to_num(m1_s[s]))
-        acc_m3 += onehot * (w[s] * np.nan_to_num(m3_s[s]))
+        dst = target[s].ravel() * npix + pix
+        ws = w[s].ravel()
+        flat_f[dst] += ws
+        flat_m1[dst] += ws * np.nan_to_num(m1_s[s]).ravel()
+        flat_m3[dst] += ws * np.nan_to_num(m3_s[s]).ravel()
 
     tot = np.where(acc_f > 0, acc_f, np.nan)
     A_out, k_out = fit_weibull_moments(acc_m1 / tot, acc_m3 / tot)

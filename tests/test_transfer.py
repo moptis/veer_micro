@@ -14,6 +14,7 @@ from scipy.stats import weibull_min
 from fuxicfd_wrf.constants import COARSE_SHAPE, MODEL_SHAPE
 from fuxicfd_wrf.model import preprocess
 from fuxicfd_wrf.transfer import (
+    K_BOUNDS,
     apply_transfer, combine_sectors, fit_weibull_moments, met_direction,
     power_density, sector_transfer, upsample_coarse, weibull_moments, wrap180,
 )
@@ -118,6 +119,39 @@ def test_moment_fit_vectorised():
     A, k = fit_weibull_moments(m1, m3)
     assert np.allclose(k, k_true, rtol=1e-5)
     assert np.allclose(A, A_true, rtol=1e-5)
+
+
+def test_moment_fit_accurate_across_the_whole_k_range():
+    """The tabulated inverse must hold across all of K_BOUNDS, not just mid-range.
+
+    `fit_weibull_moments` inverts Gamma(1+3/k)/Gamma(1+1/k)^3 by interpolating a
+    precomputed table instead of bisecting, because that curve depends on k alone
+    and a vectorised bisection re-evaluates it at every grid point sixty times
+    over. The risk of a table is that accuracy degrades where the curve is
+    steepest -- at the small-k end -- which mid-range round-trips would not catch.
+
+    The bound here is far tighter than anything downstream needs (a .wrg stores
+    round(k*100)), so this fails on a table regression long before any output
+    changes.
+    """
+    k_true = np.geomspace(K_BOUNDS[0] * 1.01, K_BOUNDS[1] * 0.99, 4001)
+    A_true = np.full_like(k_true, 9.0)
+    m1, m3 = weibull_moments(A_true, k_true)
+    A, k = fit_weibull_moments(m1, m3)
+    assert np.allclose(k, k_true, rtol=1e-8), (
+        f"max rel err {np.nanmax(np.abs(k - k_true) / k_true):.3e}")
+    assert np.allclose(A, A_true, rtol=1e-8)
+    # And the value that actually reaches the file is unchanged.
+    assert np.array_equal(np.round(k * 100), np.round(k_true * 100))
+
+
+def test_moment_fit_clips_outside_k_bounds():
+    """A ratio unreachable on K_BOUNDS clips to the bound rather than extrapolating."""
+    # k below the lower bound / above the upper bound, by construction.
+    for k_out in (0.05, 50.0):
+        m1, m3 = weibull_moments(np.array(9.0), np.array(k_out))
+        _, k = fit_weibull_moments(m1, m3)
+        assert K_BOUNDS[0] <= float(k) <= K_BOUNDS[1]
 
 
 def test_moment_fit_handles_invalid():

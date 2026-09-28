@@ -365,6 +365,17 @@ def _diagnose(src, S, S_bins, dtheta, covered):
             "max_range": float(np.nanmax(rel)),
             "median_range": float(np.nanmedian(rel)),
             "p95_range": float(np.nanpercentile(rel, 95)),
+            # Signed, not just spread: whether the speedup rises or falls with
+            # inflow speed says which way k should move. S larger in the fast
+            # bin stretches the upper tail (k down); smaller compresses it (k up).
+            "bin_quantiles": [(b + 0.5) / nb for b in range(nb)],
+            "S_p50_by_bin": [float(np.nanmedian(S_bins[:, b])) for b in range(nb)],
+            "hi_minus_lo_rel_p05": float(np.nanpercentile(
+                (S_bins[:, -1] - S_bins[:, 0]) / np.where(mean > 1e-6, mean, np.nan), 5)),
+            "hi_minus_lo_rel_p50": float(np.nanmedian(
+                (S_bins[:, -1] - S_bins[:, 0]) / np.where(mean > 1e-6, mean, np.nan))),
+            "hi_minus_lo_rel_p95": float(np.nanpercentile(
+                (S_bins[:, -1] - S_bins[:, 0]) / np.where(mean > 1e-6, mean, np.nan), 95)),
             "note": (
                 "relative spread of the speedup S across inflow speed bins. "
                 "Small (<~0.02) means one inference per sector suffices; large "

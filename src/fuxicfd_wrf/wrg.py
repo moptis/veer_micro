@@ -36,6 +36,8 @@ WAsP itself does, and it makes memory independent of series length.
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -369,7 +371,13 @@ def write_wrg(
             # be written as the literal text "nan" and break any WAsP-style reader.
             df[i] = np.round(np.nan_to_num(col), 2)
         elif i == 4:
-            df[i] = np.round(col, 0)
+            # Power density is a float column like 2 and 3, and it needs the same
+            # treatment for a worse reason. `to_csv` renders NaN as the *empty
+            # string*, so an uncovered point wrote a line with 56 fields instead
+            # of 57 -- every sector value after it shifted left by one, silently,
+            # in a file that still parses. Measured on sww: 1,500 of 1,951,500
+            # lines, the whole uncovered edge column.
+            df[i] = np.round(np.nan_to_num(col), 0)
         else:
             df[i] = np.round(np.nan_to_num(col), 0).astype(np.int64)
     df.insert(0, "GridPoint", "GridPoint")
@@ -380,9 +388,25 @@ def write_wrg(
             int(df["X"].min()), int(df["Y"].min()), int(round(resolution_m)),
         ]
     )
-    with open(path, "w") as fh:
-        fh.write(header + "\n")
-    df.to_csv(path, sep=" ", header=False, mode="a", index=False)
+    # Write to a sibling temp file and rename into place. os.replace is atomic
+    # within a filesystem, so `path` only ever exists complete: a reader either
+    # sees the previous version or the new one, never a truncated prefix.
+    #
+    # This is not hypothetical. Two overlapping sweeps were once launched with
+    # intersecting cell sets, and the second wrote a complete file while the
+    # first was still running the same cell; when the first reached its write it
+    # truncated the finished file back to a 28-byte header. A validation pass
+    # that had counted the file as present would have read nothing, and the
+    # resume guard (`test -s`) would have called the placeholder "done".
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    try:
+        with open(tmp, "w") as fh:
+            fh.write(header + "\n")
+        df.to_csv(tmp, sep=" ", header=False, mode="a", index=False)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return path
 
 
