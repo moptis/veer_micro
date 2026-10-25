@@ -144,8 +144,8 @@ class TerrainConfig(BaseModel):
     #: normalizes to 0 and carries no signal -- an attribution diagnostic for
     #: separating terrain-driven from roughness-driven structure, not a production
     #: setting. See terrain/build.py.
-    dem_mode: Literal["absolute", "recentered", "constant"] = "absolute"
-    roughness_mode: Literal["absolute", "recentered", "constant"] = "absolute"
+    dem_mode: Literal["absolute", "recentered", "constant", "coarse"] = "absolute"
+    roughness_mode: Literal["absolute", "recentered", "constant", "coarse"] = "absolute"
     cache_root: Path = Field(default_factory=default_cache_root)
 
 
@@ -182,6 +182,80 @@ class OutputConfig(BaseModel):
         if self.time_chunk < 1:
             raise ValueError("output.time_chunk must be >= 1")
         return self
+
+
+class WrgSourceConfig(BaseModel):
+    """A coarse ``.wrg`` used as the driving field."""
+
+    path: Path
+    #: The `.wrg` format records no projection and it cannot be inferred from the
+    #: coordinates -- a UTM easting is a plausible number in several zones. Tiles
+    #: are laid out in this CRS by default, which makes the geometry fit exact.
+    crs: str
+    #: Split each sector into this many equal-probability inflow speed bins. 1
+    #: drives each sector at its mean speed; >1 costs proportionally more
+    #: inference and measures whether the speedup is speed-invariant at all.
+    speed_bins: int = 1
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.speed_bins < 1:
+            raise ValueError(f"source.speed_bins must be >= 1, got {self.speed_bins}")
+        return self
+
+
+class DownscaleOutputConfig(BaseModel):
+    path: Path
+    #: Output grid spacing. The model's native lattice is 30.1003 m, so anything
+    #: finer than ~30 m interpolates without adding information.
+    resolution_m: float = 100.0
+    hub_height: float = 100.0
+    air_density: float = 1.225
+    #: Fraction trimmed from each edge of the tile envelope. 0 keeps everything.
+    buffer: float = 0.0
+    #: Redistribute sector frequency by the modelled flow deflection. Turn off to
+    #: isolate the speedup when comparing against a timestep-derived transfer.
+    deflect: bool = True
+    #: Also write the raw speedup/deflection fields alongside the .wrg.
+    save_transfer: bool = True
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.resolution_m <= 0:
+            raise ValueError("output.resolution_m must be positive")
+        if not 0.0 <= self.buffer < 0.5:
+            raise ValueError("output.buffer must be in [0, 0.5)")
+        return self
+
+
+class DownscaleConfig(BaseModel):
+    """Configuration for the sector-transfer path: coarse .wrg -> fine .wrg.
+
+    Deliberately not a `RunConfig`: there is no time axis, no Zarr store, no
+    sharding and no dtype choice, so reusing that model would carry a dozen
+    fields that mean nothing here.
+    """
+
+    name: str = "downscale"
+    source: WrgSourceConfig
+    tiling: TilingConfig
+    terrain: TerrainConfig = Field(default_factory=TerrainConfig)
+    model: ModelConfig = Field(default_factory=ModelConfig)
+    output: DownscaleOutputConfig
+
+    @classmethod
+    def from_yaml(cls, path: Path | str) -> "DownscaleConfig":
+        with open(path) as fh:
+            raw = yaml.safe_load(fh)
+        cfg = cls.model_validate(raw)
+        if not cfg.tiling.overlaps:
+            print(
+                "[config] WARNING: tiles do not overlap "
+                f"(stride_m={cfg.tiling.stride_m}). FuXi-CFD sees only its 9 km "
+                "window with no buffer, so tile edges are its least reliable "
+                "region and will show as seams. Consider tiling.stride_m: 6000."
+            )
+        return cfg
 
 
 class RunConfig(BaseModel):

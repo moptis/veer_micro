@@ -45,13 +45,13 @@ from pathlib import Path
 
 import numpy as np
 
-from ..constants import TERRAIN_SHAPE
+from ..constants import TERRAIN_SHAPE, TILE_SPAN_M
 from ..grids import Tile
 from ..model.preprocess import normalize_static
 from . import roughness as rough_mod
 from . import nlcd, srtm, worldcover
 
-STATIC_MODES = ("absolute", "recentered", "constant")
+STATIC_MODES = ("absolute", "recentered", "constant", "coarse")
 LANDCOVER_SOURCES = ("auto", "nlcd", "worldcover")
 
 
@@ -162,6 +162,46 @@ def _recenter(field: np.ndarray, target_mean: float) -> np.ndarray:
     return field - float(field.mean()) + target_mean
 
 
+#: Scale the "coarse" modes low-pass to: the mesoscale cell the driving WRF run
+#: resolved. Roughness variation above this scale is information the coarse
+#: field already carries; below it is what the downscaler alone supplies.
+COARSE_SCALE_M = 1000.0
+
+
+def _coarsen(field: np.ndarray, *, scale_m: float = COARSE_SCALE_M) -> np.ndarray:
+    """Low-pass a (301, 301) tile field to `scale_m`, preserving its mean.
+
+    A box filter rather than block averaging: blocks leave visible seams at the
+    block edges, and a seam in the roughness channel is exactly the kind of
+    artificial gradient that produced spurious wind dipoles when NLCD's urban
+    class speckled the field (see the README's land-cover note).
+    """
+    from scipy.ndimage import uniform_filter
+
+    res_m = TILE_SPAN_M / (TERRAIN_SHAPE[0] - 1)
+    n = max(1, int(round(scale_m / res_m)))
+    return uniform_filter(np.asarray(field, dtype=np.float64), size=n, mode="nearest")
+
+
+def _coarsen_z0(z0: np.ndarray, *, scale_m: float = COARSE_SCALE_M) -> np.ndarray:
+    """Low-pass roughness to `scale_m`, preserving the tile mean exactly.
+
+    Arithmetic, not geometric, and that is a deliberate choice about experimental
+    control rather than a claim about aerodynamics. Flow responds to ln z0, so a
+    geometric mean is the more physical average -- but the model's roughness
+    channel is normalised linearly on z0, and log-averaging a skewed field drops
+    the linear mean substantially: measured on one NLCD tile, 0.175 -> 0.106 m,
+    which is a 0.34 sigma shift in the normalised input the network sees.
+
+    This mode exists to isolate the sub-kilometre roughness forcing, so it must
+    change the structure and nothing else. An arithmetic box filter leaves the
+    mean untouched to float precision, making "absolute" vs "coarse" a genuine
+    one-variable contrast. Use the geometric mean if the question ever becomes
+    "what is the right effective roughness", which is a different question.
+    """
+    return _coarsen(np.asarray(z0, dtype=np.float64), scale_m=scale_m)
+
+
 def apply_modes(
     terrain: TerrainTile,
     in_stats: dict,
@@ -187,6 +227,15 @@ def apply_modes(
         z0 = _recenter(z0, float(np.asarray(in_stats["high_mean"])[1]))
     elif roughness_mode == "constant":
         z0 = np.full_like(z0, float(np.asarray(in_stats["high_mean"])[1]))
+    elif roughness_mode == "coarse":
+        # Keep the site's own roughness climate and its >1 km variation; remove
+        # only the sub-kilometre detail. Unlike "constant" this does not also
+        # move the mean onto the training value, so it does not tell a grassland
+        # site it is 20x rougher than it is -- the two differ in structure alone,
+        # which is what makes this the controlled contrast against "absolute".
+        z0 = _coarsen_z0(z0)
+    if dem_mode == "coarse":
+        dem = _coarsen(dem)
     return dem, z0
 
 

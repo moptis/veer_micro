@@ -96,9 +96,14 @@ def resample_to_tile(
 
     if not np.isfinite(out).all():
         n_bad = int((~np.isfinite(out)).sum())
+        # `sources` may hold Paths or plain strings (an S3 URI, for one), so take
+        # the basename textually rather than assuming Path.name -- this raise is
+        # the only report of a genuine coverage hole, and an AttributeError here
+        # replaces that diagnostic with a traceback into the error handler.
+        names = [str(s).rstrip("/").rsplit("/", 1)[-1] for s in sources]
         raise ValueError(
             f"tile {tile.tile_id}: {n_bad}/{out.size} terrain pixels unfilled. "
-            f"Sources {[p.name for p in sources]} do not fully cover "
+            f"Sources {names} do not fully cover "
             f"{tile.bounds()} in {tile.crs}."
         )
     return out.astype(dtype)

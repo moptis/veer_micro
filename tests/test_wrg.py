@@ -192,3 +192,34 @@ def test_wrg_records_have_no_nan_in_integer_columns(tmp_path):
                     rec, resolution_m=100.0)
     text = out.read_text()
     assert "nan" not in text.lower()
+
+
+def test_every_row_has_the_same_field_count(tmp_path):
+    """An uncovered point must still write a full-width row.
+
+    Checking for the text "nan" is not enough, and that is how this got through
+    once already: `to_csv` renders NaN as the *empty string*, so a NaN power
+    density wrote 56 fields where every other row had 57. Nothing says "nan",
+    the file still parses, and every sector value on those rows is shifted one
+    place left -- a consumer reading by column position silently gets sector 0's
+    frequency out of the power-density slot.
+
+    Build records whose all-sector fit is NaN (a point that collected no data at
+    all), which is what an output grid point outside the coarse WRG looks like.
+    """
+    n_sec = 12
+    hist = SectorHistograms(2, n_sec)
+    # Point 0 gets data; point 1 collects nothing, so its A/k/power density are
+    # all NaN -- exactly the uncovered-edge case.
+    speeds = np.full((300, 2), 9.0)
+    speeds[:, 1] = np.nan
+    hist.add(speeds, np.zeros((300, 2)))
+    rec = build_records(hist, elevation=np.zeros(2), hub_height=102.17944)
+    rec[1, 4] = np.nan                       # power density explicitly absent
+
+    out = write_wrg(tmp_path / "w.wrg", np.array([0.0, 100.0]), np.array([0.0, 0.0]),
+                    rec, resolution_m=100.0)
+    rows = [ln.split() for ln in out.read_text().strip().split("\n")[1:]]
+    widths = {len(r) for r in rows}
+    assert widths == {3 + 6 + 3 * n_sec}, f"ragged rows: field counts {sorted(widths)}"
+    assert "  " not in out.read_text(), "an empty field was written as a double space"

@@ -254,6 +254,34 @@ def _cmd_wrg_concat(args) -> int:
     return 0
 
 
+def _cmd_wrg_inspect(args) -> int:
+    """Summarise a coarse .wrg read as a sector-transfer driving source."""
+    from .sources.wrg_source import WrgSectorSource
+
+    src = WrgSectorSource(args.path, crs=args.crs, speed_bins=args.speed_bins)
+    print(src.describe())
+    return 0
+
+
+def _cmd_wrg_downscale(args) -> int:
+    from .config import DownscaleConfig
+    from .wrg_downscale import run as run_downscale
+
+    cfg = DownscaleConfig.from_yaml(args.config)
+    if args.device:
+        cfg.model.device = args.device
+    if args.out:
+        cfg.output.path = args.out
+    if args.hub_height is not None:
+        cfg.output.hub_height = args.hub_height
+    if args.resolution is not None:
+        cfg.output.resolution_m = args.resolution
+    if args.no_deflect:
+        cfg.output.deflect = False
+    run_downscale(cfg)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="fuxicfd-wrf",
@@ -292,6 +320,29 @@ def main(argv=None) -> int:
                    help="skip blocks this shard already wrote (needs the same "
                         "--n-shards as the original launch)")
     r.set_defaults(func=_cmd_run)
+
+    wi = sub.add_parser(
+        "wrg-inspect", help="summarise a coarse .wrg as a driving source"
+    )
+    wi.add_argument("path", type=Path)
+    wi.add_argument("--crs", required=True,
+                    help="projection the coarse .wrg is written in, e.g. EPSG:32613")
+    wi.add_argument("--speed-bins", type=int, default=1)
+    wi.set_defaults(func=_cmd_wrg_inspect)
+
+    wd = sub.add_parser(
+        "wrg-downscale",
+        help="downscale a coarse .wrg to a fine .wrg via per-sector inference",
+    )
+    wd.add_argument("config", type=Path)
+    wd.add_argument("--out", type=Path, default=None)
+    wd.add_argument("--hub-height", type=float, default=None)
+    wd.add_argument("--resolution", type=float, default=None,
+                    help="output grid spacing in m")
+    wd.add_argument("--no-deflect", action="store_true",
+                    help="keep sectors in place; downscale magnitude only")
+    wd.add_argument("--device", choices=["auto", "cpu", "cuda"], default=None)
+    wd.set_defaults(func=_cmd_wrg_downscale)
 
     v = sub.add_parser("validate", help="Phase 0 validation report")
     v.add_argument("--config", type=Path, default=None)

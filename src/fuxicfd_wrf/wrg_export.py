@@ -105,8 +105,18 @@ class _Sampler:
 def _make_sampler(
     grid: WrgGrid, sx: np.ndarray, sy: np.ndarray, *, overlap_px: int
 ) -> _Sampler | None:
-    inside_x = np.flatnonzero((grid.x >= sx[0]) & (grid.x <= sx[-1]))
-    inside_y = np.flatnonzero((grid.y <= sy[0]) & (grid.y >= sy[-1]))
+    # Include a source patch's own end points even when float error puts them a
+    # hair inside. `Tile.model_axes` accumulates 300 steps of 30.1003 m and lands
+    # ~1.5e-9 m short of the tile bound the output grid was built from, so a
+    # strict `<=` dropped the grid's final column: on sww that was 1,500 of
+    # 1,951,500 points written as uncovered, at the edge of a *fully covered*
+    # domain. The tolerance is a millionth of a cell -- far below any real
+    # geometry, and `_interp_matrix` clips the resulting index, so a point at the
+    # boundary is evaluated exactly rather than extrapolated.
+    tol_x = 1e-6 * (sx[-1] - sx[0]) / (len(sx) - 1)
+    tol_y = 1e-6 * (sy[0] - sy[-1]) / (len(sy) - 1)
+    inside_x = np.flatnonzero((grid.x >= sx[0] - tol_x) & (grid.x <= sx[-1] + tol_x))
+    inside_y = np.flatnonzero((grid.y <= sy[0] + tol_y) & (grid.y >= sy[-1] - tol_y))
     if inside_x.size == 0 or inside_y.size == 0:
         return None
     res_x = (sx[-1] - sx[0]) / (len(sx) - 1)
@@ -325,17 +335,20 @@ def _elevation_on_grid(grid: WrgGrid, tiles: list[Tile], terrain_cache) -> np.nd
     acc = np.zeros((ny, nx), dtype=np.float64)
     wsum = np.zeros((ny, nx), dtype=np.float64)
     for tile in tiles:
-        # build_terrain keys the raw cache by land-cover source: `{id}_raw.npz`
-        # only for WorldCover, `{id}_raw_{source}.npz` for anything else. Testing
-        # only for the WorldCover name meant every run with `landcover_source:
-        # nlcd` missed here and fell through to a zero elevation column -- the
-        # WRG still wrote, so it failed quietly. The DEM is identical whichever
-        # land-cover raster was fetched, so any of these files serves.
+        # build_terrain names the raw cache `{tile_id}-{geo_key}_raw.npz` for
+        # WorldCover and `{tile_id}-{geo_key}_raw_{source}.npz` otherwise. Both
+        # halves of that stem matter, and both have been got wrong here before:
+        # first the `_{source}` suffix, so every `landcover_source: nlcd` run
+        # missed; then, when geo_key was introduced to stop one domain serving
+        # another's terrain, the `-{geo_key}` infix broke the patterns again and
+        # *every* run missed. Each time the WRG still wrote, with a silently
+        # zeroed elevation column.
+        #
+        # Glob the whole stem so this tracks whatever `_cache` produces rather
+        # than restating it. The DEM is identical whichever land-cover raster was
+        # fetched, so any match serves.
         tile_cache = cache / "tiles"
-        if not (
-            (tile_cache / f"{tile.tile_id}_raw.npz").exists()
-            or any(tile_cache.glob(f"{tile.tile_id}_raw_*.npz"))
-        ):
+        if not any(tile_cache.glob(f"{tile.tile_id}-{tile.geo_key}_raw*.npz")):
             continue
         dem = build_terrain(tile, cache).dem.astype(np.float32)
         smp = _make_sampler(grid, *tile.terrain_axes(), overlap_px=0)
